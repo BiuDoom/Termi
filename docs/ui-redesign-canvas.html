@@ -1,0 +1,1809 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Termi · UI 重构交互画板（Termius 交互逻辑 × Apple Liquid Glass）</title>
+<style>
+  :root {
+    --bg-page: #07080b;
+    --bar-bg: rgba(18, 20, 28, 0.86);
+    --bar-border: rgba(255, 255, 255, 0.12);
+    --accent: #2f8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg-page);
+    color: #f3f5fb;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding-bottom: 64px;
+  }
+  /* Top switcher bar for reviewing the 8 artboards */
+  .studio-bar {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 24px;
+    background: var(--bar-bg);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border-bottom: 1px solid var(--bar-border);
+    flex-wrap: wrap;
+  }
+  .studio-brand {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: -0.2px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-right: 8px;
+  }
+  .studio-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 99px;
+    background: rgba(47, 140, 255, 0.2);
+    color: #6ab0ff;
+    border: 1px solid rgba(47, 140, 255, 0.35);
+  }
+  .studio-tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    flex: 1;
+  }
+  .studio-tab {
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 15px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(235, 240, 255, 0.78);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .studio-tab:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+  }
+  .studio-tab.active {
+    background: var(--accent);
+    border-color: rgba(255, 255, 255, 0.3);
+    color: #fff;
+    box-shadow: 0 4px 14px rgba(47, 140, 255, 0.4);
+  }
+  .studio-mode-btn {
+    height: 30px;
+    padding: 0 13px;
+    border-radius: 15px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .artboard-wrap {
+    max-width: 1280px;
+    margin: 28px auto;
+    padding: 0 24px;
+    display: none;
+  }
+  .artboard-wrap.active {
+    display: block;
+  }
+  .artboard-meta {
+    margin-bottom: 14px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .artboard-title {
+    font-size: 18px;
+    font-weight: 700;
+  }
+  .artboard-desc {
+    font-size: 13px;
+    color: rgba(232, 236, 250, 0.68);
+  }
+
+  /* ============================================================================
+     Termi Liquid Glass Design System Tokens (1200x780 Window)
+     ============================================================================ */
+  .win {
+    --win: #0c0d11;
+    --card: rgba(255, 255, 255, 0.055);
+    --card2: rgba(255, 255, 255, 0.095);
+    --card-hover: rgba(255, 255, 255, 0.08);
+    --cardline: rgba(255, 255, 255, 0.08);
+    --hair: rgba(255, 255, 255, 0.13);
+    --sep: rgba(255, 255, 255, 0.08);
+    --text: rgba(255, 255, 255, 0.95);
+    --text2: rgba(232, 236, 250, 0.70);
+    --text3: rgba(232, 236, 250, 0.48);
+    --accent: #2f8cff;
+    --sel: #1668ee;
+    --btn: #1263ea;
+    --ring: #101116;
+    --selgray: rgba(255, 255, 255, 0.11);
+    --glass-a: rgba(255, 255, 255, 0.15);
+    --glass-b: rgba(255, 255, 255, 0.055);
+    --glass-hi: rgba(255, 255, 255, 0.34);
+    --glass-line: rgba(255, 255, 255, 0.12);
+    --glass-shadow: rgba(0, 0, 0, 0.42);
+    --field: rgba(255, 255, 255, 0.07);
+    --panel: rgba(18, 20, 27, 0.72);
+    --term: #090a0e;
+    --green: #32d74b;
+    --orange: #ff9f0a;
+    --red: #ff4d43;
+    --gray: #9a9aa3;
+    --a1p: 18%;
+    --a2p: 12%;
+
+    width: 1200px;
+    height: 780px;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 26px;
+    background: var(--win);
+    color: var(--text);
+    font: 13px/1.38 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+    box-shadow: inset 0 0 0 1px var(--hair), 0 28px 80px rgba(0, 0, 0, 0.65);
+  }
+  .win.light {
+    --win: #edf0f6;
+    --card: #ffffff;
+    --card2: #e6eaf2;
+    --card-hover: #f5f7fb;
+    --cardline: rgba(20, 30, 60, 0.08);
+    --hair: rgba(20, 30, 60, 0.14);
+    --sep: rgba(20, 30, 60, 0.09);
+    --text: rgba(10, 14, 30, 0.92);
+    --text2: rgba(44, 50, 74, 0.82);
+    --text3: rgba(44, 50, 74, 0.56);
+    --accent: #0a6cf0;
+    --sel: #0a63e0;
+    --btn: #0a62e0;
+    --ring: #f6f8fc;
+    --selgray: rgba(20, 30, 60, 0.08);
+    --glass-a: rgba(255, 255, 255, 0.85);
+    --glass-b: rgba(255, 255, 255, 0.58);
+    --glass-hi: rgba(255, 255, 255, 1);
+    --glass-line: rgba(20, 30, 60, 0.1);
+    --glass-shadow: rgba(40, 60, 120, 0.14);
+    --field: rgba(20, 30, 60, 0.055);
+    --panel: rgba(244, 246, 251, 0.88);
+    --term: #0e1015;
+    --green: #15924a;
+    --orange: #c56800;
+    --red: #d7332a;
+    --gray: #676c7e;
+    --a1p: 14%;
+    --a2p: 10%;
+  }
+
+  .stage {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    background:
+      radial-gradient(720px 460px at 82% -12%, color-mix(in srgb, var(--accent) var(--a1p), transparent), transparent 72%),
+      radial-gradient(620px 560px at -10% 112%, color-mix(in srgb, var(--accent) var(--a2p), transparent), transparent 72%);
+  }
+
+  .mono { font-family: "SF Mono", ui-monospace, Menlo, monospace; letter-spacing: 0; }
+  .num { font-variant-numeric: tabular-nums; }
+  .t2 { color: var(--text2); }
+  .t3 { color: var(--text3); }
+  .cap { font-size: 11px; line-height: 14px; }
+  .ell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .grow { flex: 1; min-width: 0; }
+  .hstack { display: flex; align-items: center; }
+  .vstack { display: flex; flex-direction: column; }
+
+  /* Liquid Glass Controls */
+  .glass, .pill, .search, .btn-glass {
+    background: linear-gradient(180deg, var(--glass-a), var(--glass-b));
+    backdrop-filter: blur(26px) saturate(175%);
+    -webkit-backdrop-filter: blur(26px) saturate(175%);
+    box-shadow: inset 0 1px 0 var(--glass-hi), inset 0 0 0 1px var(--glass-line), 0 2px 10px var(--glass-shadow);
+  }
+  .btn-pri {
+    color: #fff;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--btn) 80%, white) 0%, var(--btn) 52%, color-mix(in srgb, var(--btn) 88%, black) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.14), 0 6px 18px color-mix(in srgb, var(--btn) 44%, transparent);
+  }
+
+  /* Unified Window Titlebar + Top Surface Switcher (Termius-aligned) */
+  .top-shell {
+    height: 50px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--sep);
+  }
+  .lights {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-right: 6px;
+  }
+  .lights i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: block;
+  }
+  .surface-pill {
+    height: 34px;
+    border-radius: 17px;
+    padding: 0 4px;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .surface-tab {
+    height: 26px;
+    padding: 0 11px;
+    border-radius: 13px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text2);
+  }
+  .surface-tab.on {
+    background: color-mix(in srgb, var(--accent) 22%, var(--selgray));
+    color: var(--text);
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--glass-hi) 60%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--accent) 38%, transparent);
+  }
+  .session-strip {
+    height: 34px;
+    border-radius: 17px;
+    padding: 0 4px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .ses-tab {
+    height: 26px;
+    padding: 0 9px 0 6px;
+    border-radius: 13px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text2);
+  }
+  .ses-tab.on {
+    background: var(--card2);
+    color: var(--text);
+    font-weight: 600;
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--glass-hi) 50%, transparent);
+  }
+  .ses-plus {
+    width: 26px;
+    height: 26px;
+    border-radius: 13px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text2);
+    font-weight: 600;
+  }
+  .kbd {
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 5px;
+    background: var(--card2);
+    color: var(--text3);
+    font-size: 10.5px;
+    font-family: "SF Mono", ui-monospace, monospace;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* Body split: Vault Sidebar + Main Content + Right Inspector */
+  .body-split {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+  .vault-side {
+    width: 210px;
+    flex: none;
+    padding: 10px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-right: 1px solid var(--sep);
+  }
+  .side-sec {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text3);
+    padding: 10px 10px 4px;
+  }
+  .side-row {
+    height: 32px;
+    padding: 0 10px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 500;
+    color: var(--text2);
+  }
+  .side-row.sel {
+    font-weight: 600;
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 22%, var(--selgray));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent);
+  }
+  .side-badge {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--green) 18%, transparent);
+    color: var(--green);
+  }
+
+  /* Vault Page Main Area */
+  .vault-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 14px 20px 20px;
+    gap: 12px;
+    overflow: hidden;
+  }
+  .vault-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+  }
+  .split-btn {
+    height: 32px;
+    border-radius: 16px;
+    display: inline-flex;
+    align-items: center;
+    overflow: hidden;
+    font-weight: 600;
+    font-size: 12.5px;
+  }
+  .split-btn .main-part {
+    padding: 0 12px 0 13px;
+    height: 100%;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .split-btn .chev-part {
+    padding: 0 9px 0 7px;
+    height: 100%;
+    display: inline-flex;
+    align-items: center;
+    border-left: 1px solid rgba(255, 255, 255, 0.22);
+  }
+  .btn-pill {
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 16px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .search-box {
+    height: 32px;
+    border-radius: 16px;
+    padding: 0 6px 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text3);
+    flex: 1;
+    max-width: 340px;
+  }
+
+  /* 2-line Minimal Vault Cards (Termius density + Liquid Glass content surface) */
+  .card-grid-2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .card-grid-3 {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .vcard {
+    height: 64px;
+    padding: 10px 12px;
+    border-radius: 15px;
+    background: var(--card);
+    box-shadow: inset 0 0 0 1px var(--cardline);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: relative;
+  }
+  .vcard.sel {
+    background: color-mix(in srgb, var(--accent) 13%, var(--card));
+    box-shadow: inset 0 0 0 2px var(--accent), 0 8px 24px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  .vcard.placeholder {
+    border: 1.5px dashed color-mix(in srgb, var(--accent) 65%, transparent);
+    background: color-mix(in srgb, var(--accent) 9%, var(--card));
+    box-shadow: none;
+  }
+  .vcard .edit-Hover {
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    background: var(--card2);
+    color: var(--text2);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: auto;
+    flex: none;
+  }
+  .tile-40 {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 700;
+    position: relative;
+    flex: none;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.38), inset 0 0 0 0.5px rgba(255, 255, 255, 0.18);
+  }
+  .tile-22 {
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    position: relative;
+    flex: none;
+  }
+  .status-dot {
+    position: absolute;
+    right: -3px;
+    bottom: -3px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px var(--ring);
+  }
+
+  /* Right-Side Live Inspector Editor (370pt, No Modal, Auto-save, Pinned Primary CTA) */
+  .inspector {
+    width: 372px;
+    flex: none;
+    border-left: 1px solid var(--sep);
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .insp-head {
+    height: 46px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--sep);
+    flex: none;
+  }
+  .insp-title {
+    font-size: 14px;
+    font-weight: 700;
+  }
+  .insp-saved {
+    font-size: 11px;
+    color: var(--text3);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .insp-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .insp-foot {
+    padding: 12px 16px 14px;
+    border-top: 1px solid var(--sep);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+  }
+  .form-sec-title {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text2);
+    padding: 0 4px 5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .form-card {
+    background: var(--card);
+    border-radius: 14px;
+    box-shadow: inset 0 0 0 1px var(--cardline);
+    overflow: hidden;
+  }
+  .form-row {
+    min-height: 36px;
+    padding: 6px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12.5px;
+  }
+  .form-row + .form-row {
+    box-shadow: inset 0 1px 0 var(--sep);
+  }
+  .form-row .k {
+    width: 72px;
+    color: var(--text2);
+    flex: none;
+  }
+  .form-row .v {
+    flex: 1;
+    text-align: right;
+    color: var(--text);
+    min-width: 0;
+  }
+  .form-row .v.placeholder-inherit {
+    color: var(--text3);
+  }
+  .chip {
+    height: 20px;
+    padding: 0 8px;
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    background: color-mix(in srgb, var(--text) 9%, transparent);
+    color: var(--text2);
+  }
+</style>
+</head>
+<body>
+
+<header class="studio-bar">
+  <div class="studio-brand">
+    <span>Termi UI Redesign</span>
+    <span class="studio-badge">Termius 交互 × Liquid Glass</span>
+  </div>
+  <div class="studio-tabs" id="studioTabs">
+    <button class="studio-tab active" data-target="ab1">1. 主机 + 右侧就地编辑器</button>
+    <button class="studio-tab" data-target="ab2">2. ⌘T 新标签选主机与工作区</button>
+    <button class="studio-tab" data-target="ab3">3. SFTP 双端任选 + 窗格内选主机</button>
+    <button class="studio-tab" data-target="ab4">4. 端口转发 + 右侧向导/表单</button>
+    <button class="studio-tab" data-target="ab5">5. 密钥库 + 面板内安装公钥</button>
+    <button class="studio-tab" data-target="ab6">6. 终端 + 4页签检查器(外观实时预览)</button>
+    <button class="studio-tab" data-target="ab7">7. 终端窗格内联步骤/认证/指纹</button>
+    <button class="studio-tab" data-target="ab8">8. 代码片段 + {{变量}}就地编辑</button>
+  </div>
+  <button class="studio-mode-btn" id="toggleThemeBtn">切换浅色 / 深色</button>
+</header>
+
+<!-- ==========================================================================
+     ARTBOARD 1: Hosts Grid + Right-Side Live Inspector Editor
+     ========================================================================== -->
+<section class="artboard-wrap active" id="ab1">
+  <div class="artboard-meta">
+    <div class="artboard-title">画板 1 · 主机页与右侧就地编辑器（零模态 Sheet + 自动保存 + 实时卡片同步）</div>
+    <div class="artboard-desc">对应审计项：SH-01, HO-01, HO-03, ED-01 ~ ED-05 · 双行极简卡片，右侧 372pt 检查器直接编辑并自动保存，底部唯一「连接」主操作</div>
+  </div>
+  <div class="win">
+    <div class="stage">
+      <!-- Top Bar: Fixed Vaults (⌘1) + SFTP (⌘2) + Session Tabs + New Tab (+) -->
+      <div class="top-shell">
+        <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+        <div class="surface-pill glass">
+          <div class="surface-tab on"><span>保险库</span><span class="kbd">⌘1</span></div>
+          <div class="surface-tab"><span>SFTP</span><span class="kbd">⌘2</span></div>
+        </div>
+        <div class="session-strip glass">
+          <div class="ses-tab">
+            <span class="tile-22" style="background:linear-gradient(150deg,#ee7d56,#e95420)">U<i class="status-dot" style="background:var(--green)"></i></span>
+            <span>prod-web-01</span>
+            <span class="kbd">⌘3</span>
+          </div>
+          <div class="ses-tab">
+            <span class="tile-22" style="background:linear-gradient(150deg,#d43d66,#c70036)">D<i class="status-dot" style="background:var(--orange)"></i></span>
+            <span>bastion</span>
+            <span class="cap" style="color:var(--orange)">等密码</span>
+          </div>
+          <div class="ses-plus" title="新标签页 (⌘T)">+</div>
+        </div>
+        <span class="grow"></span>
+        <!-- Quick Connect / Search integrated -->
+        <div class="search-box glass">
+          <span>⌕</span>
+          <span class="ell">搜索主机，或输入 ssh user@host 直连…</span>
+          <span class="kbd" style="margin-left:auto">⌘F</span>
+        </div>
+      </div>
+
+      <div class="body-split">
+        <!-- Vault Sidebar (Only shown in Vaults surface) -->
+        <aside class="vault-side">
+          <div class="side-sec">保险库</div>
+          <div class="side-row sel"><span>▤</span><span>主机</span></div>
+          <div class="side-row"><span>🔑</span><span>密钥与身份</span></div>
+          <div class="side-row"><span>⇄</span><span>端口转发</span><span class="side-badge">2</span></div>
+          <div class="side-row"><span>{}</span><span>代码片段</span></div>
+          <div class="side-row"><span>✓</span><span>已知主机</span></div>
+          <div class="side-row"><span>🕒</span><span>历史记录</span></div>
+          <div class="side-sec">运维工具</div>
+          <div class="side-row"><span>⚡</span><span>批量命令</span></div>
+          <div class="side-row"><span>📈</span><span>监控</span></div>
+          <div class="side-row"><span>🐳</span><span>Docker</span></div>
+          <div class="hstack" style="margin-top:auto;padding:8px 10px;color:var(--text2);font-size:12px">
+            <span>⚙ 设置 (⌘,)</span>
+            <span class="grow"></span>
+            <span>🔒 锁定</span>
+          </div>
+        </aside>
+
+        <!-- Main Host Grid (Reflows to 2 columns while right inspector is open) -->
+        <main class="vault-main">
+          <div class="vault-toolbar">
+            <div class="split-btn btn-pri">
+              <span class="main-part">+ 新建主机</span>
+              <span class="chev-part">▾</span>
+            </div>
+            <div class="btn-pill btn-glass"><span>&gt;_ 本地终端</span><span class="kbd">⌘L</span></div>
+            <div class="btn-pill btn-glass"><span>导入 ~/.ssh/config</span></div>
+            <span class="grow"></span>
+            <div class="btn-pill btn-glass"><span># 标签 (1) ▾</span></div>
+            <div class="btn-pill btn-glass"><span>⇅ 最近使用 ▾</span></div>
+            <div class="btn-pill btn-glass"><span>⊞ 网格</span></div>
+          </div>
+
+          <!-- Groups Section -->
+          <div class="form-sec-title" style="padding-top:2px"><span>分组 · 2</span><span class="cap t3">双击分组可一键在工作区打开组内全部主机</span></div>
+          <div class="card-grid-2">
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#2f8cff,#1263ea)">📁</span>
+              <div class="vstack grow">
+                <span style="font-weight:600">Production</span>
+                <span class="cap t2">7 台主机 · 默认跳板 bastion · 用户 deploy</span>
+              </div>
+              <span class="edit-Hover" title="编辑分组默认值">✎</span>
+            </div>
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#6366f1,#4338ca)">📁</span>
+              <div class="vstack grow">
+                <span style="font-weight:600">Home lab</span>
+                <span class="cap t2">3 台主机 · 直连</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+          </div>
+
+          <!-- Hosts Section (2-line cards: 40px tile + Name + protocol/user@host) -->
+          <div class="form-sec-title" style="padding-top:4px"><span>Production · 7</span></div>
+          <div class="card-grid-2">
+            <div class="vcard sel">
+              <span class="tile-40" style="background:linear-gradient(150deg,#48b691,#0e9f6e)">R<i class="status-dot" style="background:var(--green)"></i></span>
+              <div class="vstack grow">
+                <div class="hstack" style="gap:6px"><span style="font-weight:600" class="ell">db-primary</span><span class="cap t3" title="经由跳板机 bastion">⑂ bastion</span></div>
+                <span class="cap t2 mono ell">ssh · postgres@10.0.2.20:22</span>
+              </div>
+              <span class="edit-Hover" style="background:var(--accent);color:#fff" title="正在右侧编辑 (⌘I)">✎</span>
+            </div>
+
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#ee7d56,#e95420)">U<i class="status-dot" style="background:var(--green)"></i></span>
+              <div class="vstack grow">
+                <div class="hstack" style="gap:6px"><span style="font-weight:600" class="ell">prod-web-01</span><span class="cap t3">⑂ bastion</span></div>
+                <span class="cap t2 mono ell">ssh · deploy@10.0.1.11</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#d43d66,#c70036)">D<i class="status-dot" style="background:var(--green)"></i></span>
+              <div class="vstack grow">
+                <span style="font-weight:600" class="ell">bastion</span>
+                <span class="cap t2 mono ell">ssh · ops@10.0.0.10</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#ee7d56,#e95420)">U</span>
+              <div class="vstack grow">
+                <div class="hstack" style="gap:6px"><span style="font-weight:600" class="ell">k8s-node-1</span><span class="cap t3">⑂ bastion</span></div>
+                <span class="cap t2 mono ell">ssh · ubuntu@10.0.3.41</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#3b82f6,#1d4ed8)">A</span>
+              <div class="vstack grow">
+                <div class="hstack" style="gap:6px"><span style="font-weight:600" class="ell">redis-cache</span><span class="cap t3">⑂ bastion</span></div>
+                <span class="cap t2 mono ell">ssh · ops@10.0.2.30</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#767e88,#4b5563)">L</span>
+              <div class="vstack grow">
+                <span style="font-weight:600" class="ell">staging-api</span>
+                <span class="cap t2 mono ell">ssh · deploy@staging-api.corp.invalid</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+          </div>
+        </main>
+
+        <!-- Right-Side Inspector Editor (Replaces both read-only HostDetailView & modal HostFormView) -->
+        <aside class="inspector">
+          <div class="insp-head">
+            <span class="insp-title">主机详情</span>
+            <span class="insp-saved">✓ 已自动保存</span>
+            <span class="grow"></span>
+            <span class="btn-pill btn-glass" style="height:26px;padding:0 8px" title="复制主机、打开 SFTP、删除…">⋯</span>
+            <span class="btn-pill btn-glass" style="height:26px;padding:0 8px" title="收起面板 (⌘I)">→|</span>
+          </div>
+
+          <div class="insp-body">
+            <!-- 1. Address Card -->
+            <div class="form-card">
+              <div class="form-row" style="padding:10px 12px">
+                <span class="tile-40" style="background:linear-gradient(150deg,#48b691,#0e9f6e)">R</span>
+                <div class="vstack grow" style="gap:3px">
+                  <span class="cap t3">IP 或主机名（Rocky Linux 9.4 · x86_64）</span>
+                  <span class="mono" style="font-size:13.5px;font-weight:600">10.0.2.20</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 2. General Section -->
+            <div>
+              <div class="form-sec-title"><span>通用</span></div>
+              <div class="form-card">
+                <div class="form-row"><span class="k">名称</span><span class="v" style="font-weight:600">db-primary</span></div>
+                <div class="form-row"><span class="k">所属分组</span><span class="v">Production ▾</span></div>
+                <div class="form-row">
+                  <span class="k">标签</span>
+                  <div class="v hstack" style="justify-content:flex-end;gap:5px">
+                    <span class="chip">#db</span><span class="chip">#prod</span><span class="chip">+</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 3. SSH Port & Credentials -->
+            <div>
+              <div class="form-sec-title">
+                <span>SSH 配置与凭据</span>
+                <span class="mono cap" style="color:var(--accent)">端口 [ 22 ]</span>
+              </div>
+              <div class="form-card">
+                <div class="form-row"><span class="k">身份 / 用户</span><span class="v mono">postgres (来自身份 dba) ▾</span></div>
+                <div class="form-row"><span class="k">SSH 密钥</span><span class="v mono">deploy-ed25519 ▾</span></div>
+                <div class="form-row"><span class="k">密码</span><span class="v placeholder-inherit">已保存在身份 dba 中</span></div>
+              </div>
+            </div>
+
+            <!-- 4. Jump Host Chain (Inline subpage trigger + visual route) -->
+            <div>
+              <div class="form-sec-title"><span>跳板链路 (ProxyJump)</span><span class="cap" style="color:var(--accent)">编辑链路 ›</span></div>
+              <div class="form-card" style="padding:10px 12px">
+                <div class="hstack" style="gap:6px;font-size:12px">
+                  <span class="chip">💻 这台 Mac</span>
+                  <span class="t3">⋯▸</span>
+                  <span class="chip" style="color:var(--text)">🛡️ bastion (继承自组)</span>
+                  <span class="t3">⋯▸</span>
+                  <span class="chip" style="color:var(--green)">● db-primary</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 5. Terminal Theme & Advanced -->
+            <div>
+              <div class="form-sec-title"><span>外观与高级选项</span></div>
+              <div class="form-card">
+                <div class="form-row">
+                  <span class="k">终端主题</span>
+                  <span class="v hstack" style="justify-content:flex-end;gap:6px">
+                    <i style="width:14px;height:14px;border-radius:4px;background:#1a1b26;border:1px solid var(--hair)"></i>
+                    <span>Tokyo Night ▾</span>
+                  </span>
+                </div>
+                <div class="form-row"><span class="k">启动片段</span><span class="v t3">无 ▾</span></div>
+                <div class="form-row"><span class="k">代理转发</span><span class="v t2">关闭 (默认)</span></div>
+                <div class="form-row">
+                  <span class="k">关联转发</span>
+                  <span class="v" style="color:var(--accent)">1 条规则 (15432→5432) ›</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Pinned Bottom Action (One prominent CTA + SFTP quick button) -->
+          <div class="insp-foot">
+            <div class="btn-pill btn-pri grow" style="justify-content:center;height:34px">⚡ 连接 (↵)</div>
+            <div class="btn-pill btn-glass" style="height:34px" title="在 SFTP 标签中打开此主机">📁 SFTP</div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==========================================================================
+     ARTBOARD 2: New Tab (⌘T) Host Picker & Workspace Restore
+     ========================================================================== -->
+<section class="artboard-wrap" id="ab2">
+  <div class="artboard-meta">
+    <div class="artboard-title">画板 2 · 新标签页（⌘T）：居中搜索直连 + 最近连接多选恢复 + 工作区模板</div>
+    <div class="artboard-desc">对应审计项：SH-02, TM-06 · 按 ⌘T 或点顶栏「+」打开全幅主机选择器（不再弹模态 QuickConnect Sheet），侧边栏自动收起</div>
+  </div>
+  <div class="win">
+    <div class="stage">
+      <div class="top-shell">
+        <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+        <div class="surface-pill glass">
+          <div class="surface-tab"><span>保险库</span><span class="kbd">⌘1</span></div>
+          <div class="surface-tab"><span>SFTP</span><span class="kbd">⌘2</span></div>
+        </div>
+        <div class="session-strip glass">
+          <div class="ses-tab">
+            <span class="tile-22" style="background:linear-gradient(150deg,#ee7d56,#e95420)">U<i class="status-dot" style="background:var(--green)"></i></span>
+            <span>prod-web-01</span>
+          </div>
+          <div class="ses-tab on">
+            <span>✨ 新标签页</span>
+            <span class="t3">×</span>
+          </div>
+          <div class="ses-plus">+</div>
+        </div>
+        <span class="grow"></span>
+      </div>
+
+      <!-- Full-window centered picker (No left sidebar) -->
+      <div class="vstack" style="flex:1;align-items:center;padding:42px 24px 24px;gap:22px;overflow-y:auto">
+        <div class="vstack" style="width:680px;gap:12px">
+          <div class="glass" style="height:50px;border-radius:18px;padding:0 10px 0 18px;display:flex;align-items:center;gap:12px;box-shadow:inset 0 0 0 1.5px var(--accent), 0 12px 36px rgba(0,0,0,0.35)">
+            <span style="font-size:16px;color:var(--accent)">⌕</span>
+            <span style="font-size:15px;color:var(--text)" class="grow">直接输入主机名过滤，或输入 <code class="mono" style="color:var(--accent)">ssh deploy@10.0.9.5 -p 2200</code> 直连…</span>
+            <div class="btn-pill btn-glass" style="height:32px">&gt;_ 本地终端 <span class="kbd">⌘L</span></div>
+            <div class="btn-pill btn-pri" style="height:32px">连接 ↵</div>
+          </div>
+        </div>
+
+        <!-- Workspace Templates -->
+        <div class="vstack" style="width:680px;gap:8px">
+          <div class="form-sec-title"><span>分屏工作区模板 (Workspaces)</span><span class="cap t3">双击一键恢复多窗格会话与广播设置</span></div>
+          <div class="card-grid-2">
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#2f8cff,#1263ea)">⊞</span>
+              <div class="vstack grow">
+                <span style="font-weight:600">线上 Web 双机巡检 (2 窗格 · 广播)</span>
+                <span class="cap t2 mono">prod-web-01 + prod-web-02</span>
+              </div>
+              <span class="kbd">↵</span>
+            </div>
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#0e9f6e,#0b7f58)">⊞</span>
+              <div class="vstack grow">
+                <span style="font-weight:600">数据库与缓存排障 (3 窗格)</span>
+                <span class="cap t2 mono">bastion + db-primary + redis-cache</span>
+              </div>
+              <span class="kbd">↵</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent Connections with multi-select restore / workspace creation -->
+        <div class="vstack" style="width:680px;gap:8px">
+          <div class="form-sec-title">
+            <span>最近连接 (已选 2 项)</span>
+            <span class="cap t2">⌘ 点按多选以同时恢复或组合为分屏工作区</span>
+          </div>
+          <div class="form-card">
+            <div class="form-row" style="height:48px;background:color-mix(in srgb,var(--accent) 14%,transparent)">
+              <input type="checkbox" checked>
+              <span class="tile-22" style="background:linear-gradient(150deg,#ee7d56,#e95420)">U</span>
+              <span style="font-weight:600">prod-web-01</span>
+              <span class="mono cap t2">deploy@10.0.1.11</span>
+              <span class="grow"></span>
+              <span class="chip">Production</span>
+              <span class="cap t3 num">10 分钟前</span>
+            </div>
+            <div class="form-row" style="height:48px;background:color-mix(in srgb,var(--accent) 14%,transparent)">
+              <input type="checkbox" checked>
+              <span class="tile-22" style="background:linear-gradient(150deg,#ee7d56,#e95420)">U</span>
+              <span style="font-weight:600">prod-web-02</span>
+              <span class="mono cap t2">deploy@10.0.1.12</span>
+              <span class="grow"></span>
+              <span class="chip">Production</span>
+              <span class="cap t3 num">2 小时前</span>
+            </div>
+            <div class="form-row" style="height:48px">
+              <input type="checkbox">
+              <span class="tile-22" style="background:linear-gradient(150deg,#48b691,#0e9f6e)">R</span>
+              <span style="font-weight:600">db-primary</span>
+              <span class="mono cap t2">postgres@10.0.2.20</span>
+              <span class="grow"></span>
+              <span class="chip">Production</span>
+              <span class="cap t3 num">昨天</span>
+            </div>
+            <div class="form-row" style="height:48px">
+              <input type="checkbox">
+              <span class="tile-22" style="background:linear-gradient(150deg,#767e88,#4b5563)">L</span>
+              <span style="font-weight:600">nas</span>
+              <span class="mono cap t2">admin@192.168.1.20</span>
+              <span class="grow"></span>
+              <span class="chip">Home lab</span>
+              <span class="cap t3 num">3 天前</span>
+            </div>
+          </div>
+
+          <!-- Floating multi-select action bar -->
+          <div class="hstack glass" style="height:44px;border-radius:14px;padding:0 14px;margin-top:4px;gap:10px">
+            <span style="font-weight:600">已选择 2 台主机</span>
+            <span class="grow"></span>
+            <div class="btn-pill btn-glass" style="height:30px">⊞ 存为分屏工作区模板</div>
+            <div class="btn-pill btn-pri" style="height:30px">⚡ 在分屏中同时打开 (⌘↵)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==========================================================================
+     ARTBOARD 3: SFTP Dual-Endpoint Browser + In-Pane Host Picker
+     ========================================================================== -->
+<section class="artboard-wrap" id="ab3">
+  <div class="artboard-meta">
+    <div class="artboard-title">画板 3 · SFTP 双端文件浏览器：窗格内原地选主机 + 任意端 Local/Remote + 底部单行进度与编辑确认</div>
+    <div class="artboard-desc">对应审计项：SF-01, SF-02, SF-03 · 左窗格浏览本机或主机 A，右窗格原地展开「选择主机」（支持选另一台远程主机或本地文件系统）</div>
+  </div>
+  <div class="win">
+    <div class="stage">
+      <div class="top-shell">
+        <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+        <div class="surface-pill glass">
+          <div class="surface-tab"><span>保险库</span><span class="kbd">⌘1</span></div>
+          <div class="surface-tab on"><span>SFTP</span><span class="kbd">⌘2</span></div>
+        </div>
+        <div class="session-strip glass">
+          <div class="ses-tab">
+            <span class="tile-22" style="background:linear-gradient(150deg,#ee7d56,#e95420)">U<i class="status-dot" style="background:var(--green)"></i></span>
+            <span>prod-web-01</span>
+          </div>
+          <div class="ses-plus">+</div>
+        </div>
+        <span class="grow"></span>
+        <div class="btn-pill btn-glass">👁 显示隐藏文件</div>
+      </div>
+
+      <!-- Dual Pane SFTP Area (Full window width, no left sidebar) -->
+      <div class="vstack" style="flex:1;padding:12px 16px 14px;gap:10px;min-height:0">
+        <div class="hstack" style="flex:1;gap:12px;min-height:0">
+          <!-- LEFT PANE: Connected to Local (or Remote Host A) -->
+          <div class="form-card vstack" style="flex:1;height:100%">
+            <!-- Pane Header -->
+            <div class="hstack" style="padding:10px 12px;gap:8px;border-bottom:1px solid var(--sep)">
+              <span class="tile-22" style="background:#58585c">💻</span>
+              <span style="font-weight:700">本地 (这台 Mac) ▾</span>
+              <span class="grow"></span>
+              <div class="glass" style="height:26px;border-radius:13px;padding:0 10px;display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text3)">
+                <span>⌕</span><span>过滤当前目录…</span>
+              </div>
+              <div class="btn-pill btn-glass" style="height:26px;padding:0 10px;font-size:11.5px">操作 ▾</div>
+            </div>
+            <!-- Breadcrumb & History Bar (Click current segment to refresh, click blank to edit path) -->
+            <div class="hstack" style="padding:6px 12px;gap:6px;border-bottom:1px solid var(--sep);background:var(--field);font-size:12px">
+              <span class="t2">‹</span><span class="t3">›</span>
+              <span class="mono t2">Users ▸ user ▸ release-bundles ▸</span>
+              <span class="mono" style="font-weight:600;color:var(--accent)" title="点击当前目录段即可刷新">v2.1.0 ↻</span>
+              <span class="grow" title="点击空白处或按 ⌘L 直接输入完整路径"></span>
+              <span class="kbd">⌘L</span>
+            </div>
+            <!-- Compact 26pt File Table with '..' parent row -->
+            <div class="vstack grow" style="font-size:12px">
+              <div class="hstack t3" style="height:26px;padding:0 12px;border-bottom:1px solid var(--sep);font-size:11px;font-weight:600">
+                <span style="flex:2">名称 ▲</span>
+                <span style="width:90px;text-align:right">大小</span>
+                <span style="width:110px;text-align:right">修改时间</span>
+                <span style="width:84px;text-align:right">权限</span>
+              </div>
+              <div class="hstack" style="height:28px;padding:0 12px;border-bottom:1px solid var(--sep)">
+                <span style="flex:2" class="mono">📁 .. (上级目录)</span>
+                <span style="width:90px;text-align:right" class="t3">—</span>
+                <span style="width:110px;text-align:right" class="t3">—</span>
+                <span style="width:84px;text-align:right" class="t3">—</span>
+              </div>
+              <div class="hstack" style="height:28px;padding:0 12px;background:color-mix(in srgb,var(--accent) 18%,transparent)">
+                <span style="flex:2;font-weight:600">📦 release-2.1.0.tar.gz</span>
+                <span style="width:90px;text-align:right" class="num">24.8 MB</span>
+                <span style="width:110px;text-align:right" class="num t2">今天 14:10</span>
+                <span style="width:84px;text-align:right" class="mono cap t2">rw-r--r--</span>
+              </div>
+              <div class="hstack" style="height:28px;padding:0 12px">
+                <span style="flex:2">📄 nginx.conf</span>
+                <span style="width:90px;text-align:right" class="num">4.2 KB</span>
+                <span style="width:110px;text-align:right" class="num t2">今天 13:55</span>
+                <span style="width:84px;text-align:right" class="mono cap t2">rw-r--r--</span>
+              </div>
+              <div class="hstack" style="height:28px;padding:0 12px">
+                <span style="flex:2">📜 deploy.sh</span>
+                <span style="width:90px;text-align:right" class="num">1.8 KB</span>
+                <span style="width:110px;text-align:right" class="num t2">昨天 19:20</span>
+                <span style="width:84px;text-align:right" class="mono cap t2">rwxr-xr-x</span>
+              </div>
+            </div>
+            <div class="hstack cap t2" style="height:26px;padding:0 12px;border-top:1px solid var(--sep)">
+              <span>已选 1 项 · 共 3 项 (24.8 MB)</span>
+            </div>
+          </div>
+
+          <!-- RIGHT PANE: In-Pane Host Picker (Termius 12-sftp-select-host-in-pane style) -->
+          <div class="form-card vstack" style="flex:1;height:100%">
+            <div class="hstack" style="padding:10px 12px;gap:8px;border-bottom:1px solid var(--sep)">
+              <span class="btn-pill btn-glass" style="height:26px;padding:0 8px">← 返回</span>
+              <span style="font-weight:700">为此窗格选择目标端点</span>
+              <span class="grow"></span>
+              <div class="btn-pill btn-glass" style="height:26px;padding:0 10px;font-size:11.5px">💻 设为本地文件系统</div>
+            </div>
+            <div class="hstack" style="padding:8px 12px;gap:8px;border-bottom:1px solid var(--sep)">
+              <div class="glass grow" style="height:28px;border-radius:14px;padding:0 10px;display:flex;align-items:center;gap:6px;font-size:12px">
+                <span>⌕</span><span class="t3">搜索要连接的主机…</span>
+              </div>
+              <span class="chip">#prod ▾</span>
+              <span class="chip">⇅ 最近连接</span>
+            </div>
+            <div class="vstack grow" style="padding:10px 12px;gap:8px;overflow-y:auto">
+              <div class="form-sec-title"><span>已打开会话的主机（秒连复用主连接）</span></div>
+              <div class="vcard sel" style="height:54px">
+                <span class="tile-22" style="width:32px;height:32px;border-radius:8px;background:linear-gradient(150deg,#ee7d56,#e95420)">U<i class="status-dot" style="background:var(--green)"></i></span>
+                <div class="vstack grow">
+                  <span style="font-weight:600">prod-web-01</span>
+                  <span class="cap t2 mono">deploy@10.0.1.11 · 已连接</span>
+                </div>
+                <span class="btn-pill btn-pri" style="height:26px;font-size:11.5px">连接 ↵</span>
+              </div>
+              <div class="form-sec-title" style="padding-top:4px"><span>全部主机</span></div>
+              <div class="vcard" style="height:54px">
+                <span class="tile-22" style="width:32px;height:32px;border-radius:8px;background:linear-gradient(150deg,#48b691,#0e9f6e)">R</span>
+                <div class="vstack grow">
+                  <span style="font-weight:600">db-primary</span>
+                  <span class="cap t2 mono">postgres@10.0.2.20 · 经由 bastion</span>
+                </div>
+              </div>
+              <div class="vcard" style="height:54px">
+                <span class="tile-22" style="width:32px;height:32px;border-radius:8px;background:linear-gradient(150deg,#767e88,#4b5563)">L</span>
+                <div class="vstack grow">
+                  <span style="font-weight:600">nas</span>
+                  <span class="cap t2 mono">admin@192.168.1.20</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bottom Bar 1: Remote Edit Upload Confirmation Bar -->
+        <div class="hstack glass" style="height:38px;border-radius:12px;padding:0 12px;gap:10px">
+          <span style="color:var(--orange)">●</span>
+          <span style="font-size:12px;font-weight:600">远程文件已在外部编辑器中修改：<code class="mono">prod-web-01:/etc/nginx/nginx.conf</code></span>
+          <span class="grow"></span>
+          <div class="btn-pill btn-glass" style="height:26px;font-size:11.5px">放弃修改</div>
+          <div class="btn-pill btn-pri" style="height:26px;font-size:11.5px">↑ 立即上传回服务器</div>
+        </div>
+
+        <!-- Bottom Bar 2: Single-line Transfer Progress Container -->
+        <div class="hstack glass" style="height:38px;border-radius:12px;padding:0 12px;gap:12px">
+          <span>↑</span>
+          <span class="mono" style="font-size:12px;font-weight:600">release-2.1.0.tar.gz → prod-web-01:/opt/releases/</span>
+          <div style="width:180px;height:6px;border-radius:3px;background:var(--card2);overflow:hidden">
+            <div style="width:68%;height:100%;background:var(--accent)"></div>
+          </div>
+          <span class="cap num t2">16.9 / 24.8 MB · 11.2 MB/s · 剩余 1 秒</span>
+          <span class="grow"></span>
+          <span class="cap t3">× 取消</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==========================================================================
+     ARTBOARD 4: Port Forwarding Vault Grid + Right-Side Wizard/Form Inspector
+     ========================================================================== -->
+<section class="artboard-wrap" id="ab4">
+  <div class="artboard-meta">
+    <div class="artboard-title">画板 4 · 端口转发页：路线卡片网格（双击启停）+ 右侧面板（本地/远程/动态 + 路线图 + 向导切换）</div>
+    <div class="artboard-desc">对应审计项：VT-01, VT-02 · 废除两层模态 Sheet（33, 34），在右侧面板就地完成规则配置与一键启停</div>
+  </div>
+  <div class="win">
+    <div class="stage">
+      <div class="top-shell">
+        <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+        <div class="surface-pill glass">
+          <div class="surface-tab on"><span>保险库</span><span class="kbd">⌘1</span></div>
+          <div class="surface-tab"><span>SFTP</span><span class="kbd">⌘2</span></div>
+        </div>
+        <span class="grow"></span>
+      </div>
+      <div class="body-split">
+        <aside class="vault-side">
+          <div class="side-sec">保险库</div>
+          <div class="side-row"><span>▤</span><span>主机</span></div>
+          <div class="side-row"><span>🔑</span><span>密钥与身份</span></div>
+          <div class="side-row sel"><span>⇄</span><span>端口转发</span><span class="side-badge">2</span></div>
+          <div class="side-row"><span>{}</span><span>代码片段</span></div>
+          <div class="side-row"><span>✓</span><span>已知主机</span></div>
+          <div class="side-row"><span>🕒</span><span>历史记录</span></div>
+        </aside>
+
+        <main class="vault-main">
+          <div class="vault-toolbar">
+            <div class="split-btn btn-pri">
+              <span class="main-part">+ 新建转发规则</span>
+              <span class="chev-part" title="直接选择：本地转发 (-L) / 远程转发 (-R) / 动态 SOCKS (-D)">▾</span>
+            </div>
+            <span class="cap t2" style="margin-left:6px">双击卡片或按 ↵ 直接启动/停止隧道</span>
+            <span class="grow"></span>
+            <div class="search-box glass" style="max-width:240px"><span>⌕</span><span>搜索规则或端口…</span></div>
+          </div>
+
+          <div class="form-sec-title"><span>转发规则 · 3</span></div>
+          <div class="card-grid-2">
+            <div class="vcard sel">
+              <span class="tile-40" style="background:linear-gradient(150deg,#0e9f6e,#0b7f58)">-L<i class="status-dot" style="background:var(--green)"></i></span>
+              <div class="vstack grow">
+                <span style="font-weight:600" class="ell">生产 Postgres 本地映射</span>
+                <span class="cap t2 mono ell">127.0.0.1:15432 → db-primary → 127.0.0.1:5432</span>
+              </div>
+              <span class="chip" style="color:var(--green)">● 运行中</span>
+            </div>
+
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#2f8cff,#1263ea)">-D<i class="status-dot" style="background:var(--green)"></i></span>
+              <div class="vstack grow">
+                <span style="font-weight:600" class="ell">内网 SOCKS5 代理</span>
+                <span class="cap t2 mono ell">127.0.0.1:1080 → bastion (动态 SOCKS)</span>
+              </div>
+              <span class="chip" style="color:var(--green)">● 运行中</span>
+            </div>
+
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#767e88,#4b5563)">-R</span>
+              <div class="vstack grow">
+                <span style="font-weight:600" class="ell">staging-api:9000 → 127.0.0.1:3000</span>
+                <span class="cap t2 mono ell">远程转发 · 已停止</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+          </div>
+        </main>
+
+        <aside class="inspector">
+          <div class="insp-head">
+            <span class="insp-title">端口转发详情</span>
+            <span class="insp-saved">✓ 自动保存</span>
+            <span class="grow"></span>
+            <span class="btn-pill btn-glass" style="height:26px;padding:0 8px">⋯</span>
+            <span class="btn-pill btn-glass" style="height:26px;padding:0 8px">→|</span>
+          </div>
+          <div class="insp-body">
+            <!-- Segmented Type Switcher -->
+            <div class="surface-pill glass" style="width:100%;justify-content:space-between">
+              <div class="surface-tab on" style="flex:1;justify-content:center">本地 (-L)</div>
+              <div class="surface-tab" style="flex:1;justify-content:center">远程 (-R)</div>
+              <div class="surface-tab" style="flex:1;justify-content:center">动态 (-D)</div>
+            </div>
+
+            <!-- Route Diagram -->
+            <div class="form-card" style="padding:12px">
+              <div class="cap t2" style="margin-bottom:8px">把本机端口流量经 SSH 隧道转发至目标地址：</div>
+              <div class="hstack" style="gap:6px;font-size:11.5px">
+                <span class="chip mono">本机 :15432</span>
+                <span style="color:var(--green)">━━▸</span>
+                <span class="chip">db-primary</span>
+                <span style="color:var(--green)">━━▸</span>
+                <span class="chip mono">127.0.0.1:5432</span>
+              </div>
+            </div>
+
+            <div class="form-card">
+              <div class="form-row"><span class="k">规则名称</span><span class="v" style="font-weight:600">生产 Postgres 本地映射</span></div>
+              <div class="form-row"><span class="k">绑定地址</span><span class="v mono">127.0.0.1</span></div>
+              <div class="form-row"><span class="k">本地端口 *</span><span class="v mono" style="font-weight:700;color:var(--accent)">15432</span></div>
+              <div class="form-row"><span class="k">中转主机 *</span><span class="v">db-primary ▾</span></div>
+              <div class="form-row"><span class="k">目标地址 *</span><span class="v mono">127.0.0.1</span></div>
+              <div class="form-row"><span class="k">目标端口 *</span><span class="v mono">5432</span></div>
+            </div>
+
+            <div class="hstack" style="justify-content:space-between;padding:0 4px">
+              <span class="cap mono t3">等效命令：ssh -N -L 127.0.0.1:15432:127.0.0.1:5432</span>
+              <span class="cap" style="color:var(--accent)">打开分步向导 ›</span>
+            </div>
+          </div>
+          <div class="insp-foot">
+            <div class="btn-pill btn-glass grow" style="justify-content:center;height:34px;color:var(--red)">■ 停止转发 (↵)</div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==========================================================================
+     ARTBOARD 5: Keychain (Keys & Identities) + In-Panel Install Public Key
+     ========================================================================== -->
+<section class="artboard-wrap" id="ab5">
+  <div class="artboard-meta">
+    <div class="artboard-title">画板 5 · 密钥与身份库：统一卡片网格 + 右侧面板（拖拽导入 / Randomart / 面板内一键安装公钥到主机）</div>
+    <div class="artboard-desc">对应审计项：VT-01, VT-03 · 废除生成/导入/安装公钥 3 个模态 Sheet，右侧面板直接完成</div>
+  </div>
+  <div class="win">
+    <div class="stage">
+      <div class="top-shell">
+        <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+        <div class="surface-pill glass">
+          <div class="surface-tab on"><span>保险库</span><span class="kbd">⌘1</span></div>
+          <div class="surface-tab"><span>SFTP</span><span class="kbd">⌘2</span></div>
+        </div>
+        <span class="grow"></span>
+      </div>
+      <div class="body-split">
+        <aside class="vault-side">
+          <div class="side-sec">保险库</div>
+          <div class="side-row"><span>▤</span><span>主机</span></div>
+          <div class="side-row sel"><span>🔑</span><span>密钥与身份</span></div>
+          <div class="side-row"><span>⇄</span><span>端口转发</span></div>
+          <div class="side-row"><span>{}</span><span>代码片段</span></div>
+          <div class="side-row"><span>✓</span><span>已知主机</span></div>
+          <div class="side-row"><span>🕒</span><span>历史记录</span></div>
+        </aside>
+
+        <main class="vault-main">
+          <div class="vault-toolbar">
+            <div class="split-btn btn-pri">
+              <span class="main-part">+ 生成新密钥</span>
+              <span class="chev-part" title="导入私钥文件 / 新建身份">▾</span>
+            </div>
+            <div class="btn-pill btn-glass">+ 新建身份 (Identity)</div>
+            <div class="btn-pill btn-glass">导入密钥文件…</div>
+            <span class="grow"></span>
+            <div class="search-box glass" style="max-width:240px"><span>⌕</span><span>搜索密钥或身份…</span></div>
+          </div>
+
+          <div class="form-sec-title"><span>SSH 密钥 · 2</span></div>
+          <div class="card-grid-2">
+            <div class="vcard sel">
+              <span class="tile-40" style="background:linear-gradient(150deg,#2f8cff,#1263ea)">🔑</span>
+              <div class="vstack grow">
+                <span style="font-weight:600">deploy-ed25519</span>
+                <span class="cap t2 mono">ED25519 · 2 台主机在用</span>
+              </div>
+              <span class="edit-Hover" style="background:var(--accent);color:#fff">✎</span>
+            </div>
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#64748b,#475569)">🔑</span>
+              <div class="vstack grow">
+                <span style="font-weight:600">legacy-rsa</span>
+                <span class="cap t2 mono">RSA 3072 · 1 台主机在用</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+          </div>
+
+          <div class="form-sec-title" style="padding-top:6px"><span>可复用身份 (Identities) · 2</span></div>
+          <div class="card-grid-2">
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#8b5cf6,#6d28d9)">👤</span>
+              <div class="vstack grow">
+                <span style="font-weight:600">ops (生产运维默认)</span>
+                <span class="cap t2 mono">用户 ops · 密钥 deploy-ed25519</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#0e9f6e,#0b7f58)">👤</span>
+              <div class="vstack grow">
+                <span style="font-weight:600">dba (数据库管理员)</span>
+                <span class="cap t2 mono">用户 postgres · 已存密码</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+          </div>
+        </main>
+
+        <aside class="inspector">
+          <div class="insp-head">
+            <span class="insp-title">密钥详情</span>
+            <span class="insp-saved">✓ 自动保存</span>
+            <span class="grow"></span>
+            <span class="btn-pill btn-glass" style="height:26px;padding:0 8px">⋯</span>
+            <span class="btn-pill btn-glass" style="height:26px;padding:0 8px">→|</span>
+          </div>
+          <div class="insp-body">
+            <div class="form-card">
+              <div class="form-row"><span class="k">名称</span><span class="v" style="font-weight:600">deploy-ed25519</span></div>
+              <div class="form-row"><span class="k">算法</span><span class="v mono">ED25519 (强)</span></div>
+            </div>
+
+            <!-- Fingerprint & Randomart preserved from Termi -->
+            <div>
+              <div class="form-sec-title"><span>指纹 (SHA256)</span><span class="cap" style="color:var(--accent)">拷贝指纹</span></div>
+              <div class="form-card" style="padding:10px 12px">
+                <div class="mono cap" style="word-break:break-all">SHA256:4rTbbD7Upsj2+9C4GJ2aiTcXZD8rciiZ5zp7wQsT5eg</div>
+              </div>
+            </div>
+
+            <!-- Read-only Public Key with 1-click Copy -->
+            <div>
+              <div class="form-sec-title"><span>公钥 (只读)</span><span class="cap" style="color:var(--accent)">📋 拷贝公钥 (⌘C)</span></div>
+              <div class="form-card" style="padding:10px 12px">
+                <div class="mono cap t2" style="word-break:break-all">ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJXcoLAU/TAXZRd7STmlsdW1VnIk6S3cPRTa1SRISCYI demo@example.com</div>
+              </div>
+            </div>
+
+            <!-- Inline "Install to Host" sub-section inside the panel (No modal sheet!) -->
+            <div>
+              <div class="form-sec-title"><span>安装公钥到主机 (~/.ssh/authorized_keys)</span></div>
+              <div class="form-card">
+                <div class="form-row"><span class="k">目标主机</span><span class="v">已选 2 台 (prod-web-01, nas) ▾</span></div>
+                <div class="form-row"><span class="k">完成后</span><span class="v">自动设为所选主机的认证密钥 ✓</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="insp-foot">
+            <div class="btn-pill btn-pri grow" style="justify-content:center;height:34px">📤 安装公钥并绑定到主机</div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==========================================================================
+     ARTBOARD 6: Terminal Session + 4-Tab Right Inspector (Themes / History / Snippets / Info)
+     ========================================================================== -->
+<section class="artboard-wrap" id="ab6">
+  <div class="artboard-meta">
+    <div class="artboard-title">画板 6 · 终端工作面 + 右侧 4 页签检查器（⌘.）：查找与补全 · 代码片段 · 命令历史 · 外观与主题实时预览</div>
+    <div class="artboard-desc">对应审计项：TM-07 · 全幅终端（无左侧边栏），右侧检查器与终端主题色协调过渡，支持方向键实时预览切换当前主机主题</div>
+  </div>
+  <div class="win">
+    <div class="stage" style="background:var(--term)">
+      <div class="top-shell" style="border-bottom-color:rgba(255,255,255,0.08)">
+        <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+        <div class="surface-pill glass">
+          <div class="surface-tab"><span>保险库</span><span class="kbd">⌘1</span></div>
+          <div class="surface-tab"><span>SFTP</span><span class="kbd">⌘2</span></div>
+        </div>
+        <div class="session-strip glass">
+          <div class="ses-tab on">
+            <span class="tile-22" style="background:linear-gradient(150deg,#ee7d56,#e95420)">U<i class="status-dot" style="background:var(--green)"></i></span>
+            <span>prod-web-01</span>
+            <span class="t3">×</span>
+          </div>
+          <div class="ses-tab">
+            <span class="tile-22" style="background:linear-gradient(150deg,#48b691,#0e9f6e)">R<i class="status-dot" style="background:var(--green)"></i></span>
+            <span>db-primary</span>
+          </div>
+          <div class="ses-plus">+</div>
+        </div>
+        <span class="grow"></span>
+        <div class="btn-pill btn-glass" title="向右分屏 (⌘D)">⫼ 分屏</div>
+        <div class="btn-pill btn-glass" title="广播输入 (⇧⌘B)">((•)) 广播</div>
+        <div class="btn-pill btn-glass" title="在 SFTP 中打开此主机 (⇧⌘O)">📁 SFTP</div>
+        <div class="btn-pill btn-pri" title="终端检查器 (⌘.)">◨ 检查器 <span class="kbd" style="color:#fff;background:rgba(255,255,255,0.2)">⌘.</span></div>
+      </div>
+
+      <div class="body-split">
+        <!-- Full-width Terminal Area -->
+        <div class="vstack grow" style="padding:14px 18px;font-family:'SF Mono',ui-monospace,monospace;font-size:13px;line-height:1.5;color:#d8dee9">
+          <div style="color:#81a1c1">Welcome to Ubuntu 24.04.1 LTS (GNU/Linux 6.8.0-45-generic x86_64)</div>
+          <div style="color:#616e88">Last login: Sun Oct 18 14:12:09 2026 from 10.0.0.10</div>
+          <div style="margin-top:8px"><span style="color:#a3be8c">deploy@prod-web-01</span>:<span style="color:#88c0d0">~</span>$ systemctl status nginx --no-pager</div>
+          <div><span style="color:#a3be8c">●</span> nginx.service - A high performance web server and a reverse proxy server</div>
+          <div>     Loaded: loaded (/lib/systemd/system/nginx.service; enabled; preset: enabled)</div>
+          <div>     Active: <span style="color:#a3be8c;font-weight:700">active (running)</span> since Thu 2026-10-01 09:00:12 UTC; 2 weeks 3 days ago</div>
+          <div style="margin-top:8px"><span style="color:#a3be8c">deploy@prod-web-01</span>:<span style="color:#88c0d0">~</span>$ <span style="display:inline-block;width:8px;height:15px;background:#88c0d0;vertical-align:middle"></span></div>
+          <span class="grow"></span>
+          <!-- Floating Bottom Session Status Bar -->
+          <div class="hstack glass" style="height:32px;border-radius:16px;padding:0 14px;font-family:-apple-system,sans-serif;font-size:12px;gap:12px">
+            <span class="mono">deploy@10.0.1.11:22 (经由 bastion)</span>
+            <span class="grow"></span>
+            <span style="color:var(--green)">● 已连接 00:18:42</span>
+            <span class="t2">⇆ 1 条隧道</span>
+            <span class="mono t2">112×38</span>
+          </div>
+        </div>
+
+        <!-- 4-Tab Terminal Side Inspector (1: 查找 · 2: 片段 · 3: 历史 · 4: 外观) -->
+        <aside class="inspector" style="width:330px;background:rgba(16,18,26,0.92)">
+          <div class="insp-head" style="justify-content:space-between">
+            <div class="surface-pill glass" style="width:100%;justify-content:space-between">
+              <div class="surface-tab" title="终端查找 (⌘F)">⌕ 查找</div>
+              <div class="surface-tab" title="代码片段 (⇧⌘S)">{} 片段</div>
+              <div class="surface-tab" title="本机命令历史">🕒 历史</div>
+              <div class="surface-tab on" title="终端主题与字号">🎨 外观</div>
+            </div>
+          </div>
+
+          <div class="insp-body">
+            <!-- Font & Size Stepper -->
+            <div>
+              <div class="form-sec-title"><span>字体与字号</span></div>
+              <div class="form-card">
+                <div class="form-row"><span class="k">等宽字体</span><span class="v mono">SF Mono ▾</span></div>
+                <div class="form-row">
+                  <span class="k">字号</span>
+                  <div class="v hstack" style="justify-content:flex-end;gap:8px">
+                    <span class="btn-pill btn-glass" style="height:24px;padding:0 8px">−</span>
+                    <span class="mono num" style="font-weight:700">13 pt</span>
+                    <span class="btn-pill btn-glass" style="height:24px;padding:0 8px">+</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Theme List with instant preview for current host -->
+            <div>
+              <div class="form-sec-title"><span>配色主题（仅对 prod-web-01 生效）</span><span class="cap t3">↑↓ 预览</span></div>
+              <div class="vstack" style="gap:8px">
+                <div class="vcard sel" style="height:52px;padding:8px 12px">
+                  <div style="width:44px;height:32px;border-radius:7px;background:#2e3440;padding:4px;font-size:9px" class="mono">
+                    <span style="color:#a3be8c">$</span> <span style="color:#88c0d0">ls</span>
+                  </div>
+                  <div class="vstack grow">
+                    <span style="font-weight:600">Nord (当前使用)</span>
+                    <span class="cap t2">深色 · 冷调北极蓝</span>
+                  </div>
+                  <span style="color:var(--accent)">✓</span>
+                </div>
+
+                <div class="vcard" style="height:52px;padding:8px 12px">
+                  <div style="width:44px;height:32px;border-radius:7px;background:#1a1b26;padding:4px;font-size:9px" class="mono">
+                    <span style="color:#9ece6a">$</span> <span style="color:#7aa2f7">ls</span>
+                  </div>
+                  <div class="vstack grow">
+                    <span style="font-weight:600">Tokyo Night</span>
+                    <span class="cap t2">深色 · 高对比靛蓝</span>
+                  </div>
+                </div>
+
+                <div class="vcard" style="height:52px;padding:8px 12px">
+                  <div style="width:44px;height:32px;border-radius:7px;background:#282a36;padding:4px;font-size:9px" class="mono">
+                    <span style="color:#50fa7b">$</span> <span style="color:#ff79c6">ls</span>
+                  </div>
+                  <div class="vstack grow">
+                    <span style="font-weight:600">Dracula</span>
+                    <span class="cap t2">深色 · 经典紫粉</span>
+                  </div>
+                </div>
+
+                <div class="vcard" style="height:52px;padding:8px 12px">
+                  <div style="width:44px;height:32px;border-radius:7px;background:#fdf6e3;padding:4px;font-size:9px;border:1px solid var(--hair)" class="mono">
+                    <span style="color:#859900">$</span> <span style="color:#268bd2">ls</span>
+                  </div>
+                  <div class="vstack grow">
+                    <span style="font-weight:600">Solarized Light</span>
+                    <span class="cap t2">浅色 · 暖米护眼</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==========================================================================
+     ARTBOARD 7: In-Pane Connection Stepper, Inline Auth & Host Fingerprint
+     ========================================================================== -->
+<section class="artboard-wrap" id="ab7">
+  <div class="artboard-meta">
+    <div class="artboard-title">画板 7 · 终端窗格内联连接状态机：步骤进度条 + 窗格内密码/2FA + 首次指纹确认（不抢隔壁分屏焦点）</div>
+    <div class="artboard-desc">对应审计项：TM-01, TM-03, TM-04 · 并发连接多台主机时，认证与指纹确认内联在各自窗格卡片中，顶栏标签显示琥珀色「等输入」圆点</div>
+  </div>
+  <div class="win">
+    <div class="stage" style="background:var(--term)">
+      <div class="top-shell" style="border-bottom-color:rgba(255,255,255,0.08)">
+        <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+        <div class="surface-pill glass">
+          <div class="surface-tab"><span>保险库</span><span class="kbd">⌘1</span></div>
+          <div class="surface-tab"><span>SFTP</span><span class="kbd">⌘2</span></div>
+        </div>
+        <div class="session-strip glass">
+          <div class="ses-tab on">
+            <span class="tile-22" style="background:linear-gradient(150deg,#ee7d56,#e95420)">U<i class="status-dot" style="background:var(--orange)"></i></span>
+            <span>分屏：test-kbd · new-edge</span>
+            <span class="cap" style="color:var(--orange)">🔑 等待输入</span>
+          </div>
+          <div class="ses-plus">+</div>
+        </div>
+        <span class="grow"></span>
+      </div>
+
+      <!-- 2-Pane Split: Left pane waiting for password, Right pane waiting for Host Key trust -->
+      <div class="hstack grow" style="padding:14px;gap:14px">
+        <!-- Pane 1: Stepper + Inline Password Prompt + Expandable Verbose Log -->
+        <div class="form-card vstack" style="flex:1;height:100%;padding:24px;justify-content:center;align-items:center;border:1px solid rgba(255,159,10,0.45)">
+          <div class="vstack" style="width:440px;gap:16px">
+            <div class="hstack" style="gap:12px">
+              <span class="tile-40" style="background:linear-gradient(150deg,#ee7d56,#e95420)">U<i class="status-dot" style="background:var(--orange)"></i></span>
+              <div class="vstack grow">
+                <span style="font-size:16px;font-weight:700">正在连接到 test-kbd</span>
+                <span class="mono cap t2">SSH · tester@10.0.4.18:22 (经由跳板 bastion)</span>
+              </div>
+              <span class="btn-pill btn-glass" style="height:26px;font-size:11.5px">隐藏日志 ▴</span>
+            </div>
+
+            <!-- Stepper Bar -->
+            <div class="hstack" style="gap:8px;font-size:11.5px">
+              <span class="chip" style="color:var(--green)">✓ 1. 跳板 bastion</span>
+              <span class="t3">▸</span>
+              <span class="chip" style="color:var(--green)">✓ 2. 指纹校验</span>
+              <span class="t3">▸</span>
+              <span class="chip" style="background:color-mix(in srgb,var(--orange) 22%,transparent);color:var(--orange)">● 3. 键盘交互认证</span>
+              <span class="t3">▸</span>
+              <span class="chip t3">4. 打开终端</span>
+            </div>
+
+            <!-- Inline Password / OTP Input Card -->
+            <div class="form-card" style="padding:14px;display:flex;flex-direction:column;gap:10px;background:rgba(255,255,255,0.04)">
+              <div class="hstack" style="justify-content:space-between">
+                <span style="font-weight:600;font-size:12.5px">服务器请求输入口令 (Password / OTP)：</span>
+                <span class="cap" style="color:var(--accent)">切换为密钥认证 ▾</span>
+              </div>
+              <div class="glass" style="height:36px;border-radius:10px;padding:0 12px;display:flex;align-items:center;box-shadow:inset 0 0 0 1.5px var(--accent)">
+                <span class="mono">••••••••••••</span>
+              </div>
+              <div class="hstack" style="justify-content:space-between;margin-top:2px">
+                <label class="hstack cap t2" style="gap:6px"><input type="checkbox" checked> 保存密码到加密保险库</label>
+                <div class="hstack" style="gap:8px">
+                  <div class="btn-pill btn-glass" style="height:28px;font-size:12px">取消</div>
+                  <div class="btn-pill btn-pri" style="height:28px;font-size:12px">继续连接 ↵</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Expandable Verbose Connection Log -->
+            <div class="form-card mono cap t2" style="padding:10px 12px;background:rgba(0,0,0,0.35);line-height:1.45">
+              <div>[14:20:01] Reusing ControlMaster mux for jump host bastion (10.0.0.10:22)</div>
+              <div>[14:20:01] Connecting to 10.0.4.18 port 22 via ProxyJump...</div>
+              <div>[14:20:02] Server host key: ssh-ed25519 SHA256:8xK9pL... (matched known_hosts)</div>
+              <div style="color:var(--orange)">[14:20:02] Authentications that can continue: publickey,keyboard-interactive</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pane 2: First-time Host Key Verification (Inline, non-blocking) -->
+        <div class="form-card vstack" style="flex:1;height:100%;padding:24px;justify-content:center;align-items:center;border:1px solid rgba(255,159,10,0.45)">
+          <div class="vstack" style="width:440px;gap:14px">
+            <div class="hstack" style="gap:12px">
+              <span class="tile-40" style="background:linear-gradient(150deg,#3b82f6,#1d4ed8)">✓<i class="status-dot" style="background:var(--orange)"></i></span>
+              <div class="vstack grow">
+                <span style="font-size:16px;font-weight:700">确认未知主机指纹 · new-edge</span>
+                <span class="mono cap t2">10.0.8.90:22 · 首次连接此主机</span>
+              </div>
+            </div>
+
+            <div class="form-card" style="padding:12px;display:flex;gap:12px;align-items:center">
+              <pre class="mono" style="margin:0;font-size:9.5px;line-height:1.15;padding:8px;background:rgba(0,0,0,0.3);border-radius:8px;color:var(--accent)">+--[ED25519 256]--+
+|      .o+o.      |
+|     . *+o..     |
+|      =.*o. .    |
+|     . =.+.. o   |
+|      ..S.o + .  |
+|       .o. E +   |
++----[SHA256]-----+</pre>
+              <div class="vstack grow" style="gap:6px">
+                <span class="cap t2">服务器提供了以下 ED25519 公钥指纹：</span>
+                <span class="mono cap" style="word-break:break-all;font-weight:600">SHA256:mQ9vL2pX7wK4nB8zR1tY6uJ3hF5gD0sA9eC2vB4nM8k</span>
+                <span class="cap t3">请核对该指纹后再加入已知主机列表。</span>
+              </div>
+            </div>
+
+            <div class="hstack" style="gap:8px;justify-content:flex-end">
+              <div class="btn-pill btn-glass" style="height:30px">断开</div>
+              <div class="btn-pill btn-glass" style="height:30px">仅本次连接（不保存）</div>
+              <div class="btn-pill btn-pri" style="height:30px">加入已知主机并连接 (⌘↵)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==========================================================================
+     ARTBOARD 8: Snippets Vault Grid + Right-Side {{Variables}} & Targets Editor
+     ========================================================================== -->
+<section class="artboard-wrap" id="ab8">
+  <div class="artboard-meta">
+    <div class="artboard-title">画板 8 · 代码片段页：卡片网格 + 右侧就地编辑器（保留 Termi 独有 {{变量}} 优势 + 多目标主机一键运行）</div>
+    <div class="artboard-desc">对应审计项：VT-01, VT-04 · 结合 Termius 的右侧自动保存面板与目标主机选择器，以及 Termi 领先的 {{变量}} 占位符实时试填</div>
+  </div>
+  <div class="win">
+    <div class="stage">
+      <div class="top-shell">
+        <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+        <div class="surface-pill glass">
+          <div class="surface-tab on"><span>保险库</span><span class="kbd">⌘1</span></div>
+          <div class="surface-tab"><span>SFTP</span><span class="kbd">⌘2</span></div>
+        </div>
+        <span class="grow"></span>
+      </div>
+      <div class="body-split">
+        <aside class="vault-side">
+          <div class="side-sec">保险库</div>
+          <div class="side-row"><span>▤</span><span>主机</span></div>
+          <div class="side-row"><span>🔑</span><span>密钥与身份</span></div>
+          <div class="side-row"><span>⇄</span><span>端口转发</span></div>
+          <div class="side-row sel"><span>{}</span><span>代码片段</span></div>
+          <div class="side-row"><span>✓</span><span>已知主机</span></div>
+          <div class="side-row"><span>🕒</span><span>历史记录</span></div>
+        </aside>
+
+        <main class="vault-main">
+          <div class="vault-toolbar">
+            <div class="split-btn btn-pri">
+              <span class="main-part">+ 新建代码片段</span>
+              <span class="chev-part">▾</span>
+            </div>
+            <div class="btn-pill btn-glass">🕒 从终端历史导入</div>
+            <span class="grow"></span>
+            <div class="search-box glass" style="max-width:240px"><span>⌕</span><span>搜索片段名称或脚本…</span></div>
+          </div>
+
+          <div class="form-sec-title"><span>Diagnostics · 3</span></div>
+          <div class="card-grid-2">
+            <div class="vcard sel">
+              <span class="tile-40" style="background:linear-gradient(150deg,#2f8cff,#1263ea)">{}</span>
+              <div class="vstack grow">
+                <div class="hstack" style="gap:6px"><span style="font-weight:600">follow a systemd unit</span><span class="chip mono">{} 2</span></div>
+                <span class="cap t2 mono ell">journalctl -u {{unit}} -n {{lines}} -f</span>
+              </div>
+              <span class="edit-Hover" style="background:var(--accent);color:#fff">✎</span>
+            </div>
+
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#2f8cff,#1263ea)">{}</span>
+              <div class="vstack grow">
+                <span style="font-weight:600">system overview</span>
+                <span class="cap t2 mono ell">uname -a && uptime && df -h /</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+
+            <div class="vcard">
+              <span class="tile-40" style="background:linear-gradient(150deg,#2f8cff,#1263ea)">{}</span>
+              <div class="vstack grow">
+                <span style="font-weight:600">tail nginx errors</span>
+                <span class="cap t2 mono ell">sudo tail -n 100 -f /var/log/nginx/error.log</span>
+              </div>
+              <span class="edit-Hover">✎</span>
+            </div>
+          </div>
+        </main>
+
+        <aside class="inspector">
+          <div class="insp-head">
+            <span class="insp-title">代码片段详情</span>
+            <span class="insp-saved">✓ 自动保存</span>
+            <span class="grow"></span>
+            <span class="btn-pill btn-glass" style="height:26px;padding:0 8px">⋯</span>
+            <span class="btn-pill btn-glass" style="height:26px;padding:0 8px">→|</span>
+          </div>
+          <div class="insp-body">
+            <div class="form-card">
+              <div class="form-row"><span class="k">名称</span><span class="v" style="font-weight:600">follow a systemd unit</span></div>
+              <div class="form-row"><span class="k">分类</span><span class="v">Diagnostics ▾</span></div>
+            </div>
+
+            <div>
+              <div class="form-sec-title"><span>脚本内容 *（用 {{变量名}} 声明执行时填写的参数）</span></div>
+              <div class="form-card" style="padding:10px 12px">
+                <div class="mono" style="font-size:12.5px;line-height:1.5">journalctl -u <span style="color:var(--accent);font-weight:700">{{unit}}</span> -n <span style="color:var(--accent);font-weight:700">{{lines}}</span> -f</div>
+              </div>
+            </div>
+
+            <div>
+              <div class="form-sec-title"><span>模板变量试填（2 个）</span></div>
+              <div class="form-card">
+                <div class="form-row"><span class="k mono">{{unit}}</span><span class="v mono" style="font-weight:600">nginx</span></div>
+                <div class="form-row"><span class="k mono">{{lines}}</span><span class="v mono" style="font-weight:600">200</span></div>
+              </div>
+              <div class="cap mono t2" style="padding:6px 4px 0">将执行：journalctl -u nginx -n 200 -f</div>
+            </div>
+
+            <div>
+              <div class="form-sec-title"><span>执行目标 (Targets)</span><span class="cap" style="color:var(--accent)">+ 选择主机</span></div>
+              <div class="form-card">
+                <div class="form-row"><span class="k">活动会话</span><span class="v">prod-web-01 (当前已连接) ✓</span></div>
+                <div class="form-row"><span class="k">多主机并发</span><span class="v t2">可选多台主机在新分屏工作区中同时运行</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="insp-foot">
+            <div class="btn-pill btn-glass" style="height:34px">粘贴到终端</div>
+            <div class="btn-pill btn-pri grow" style="justify-content:center;height:34px">▶ 立即运行 (↵)</div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  const tabs = document.querySelectorAll('.studio-tab');
+  const wraps = document.querySelectorAll('.artboard-wrap');
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      wraps.forEach(w => w.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(tab.dataset.target).classList.add('active');
+    });
+  });
+
+  const toggleBtn = document.getElementById('toggleThemeBtn');
+  toggleBtn.addEventListener('click', () => {
+    document.querySelectorAll('.win').forEach(w => w.classList.toggle('light'));
+  });
+</script>
+</body>
+</html>

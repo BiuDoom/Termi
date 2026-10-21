@@ -1,0 +1,76 @@
+name: Termi
+options:
+  bundleIdPrefix: dev.termi
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "16.0"
+  defaultConfig: Debug
+  groupSortPosition: top
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    PRODUCT_BUNDLE_IDENTIFIER: dev.termi.Termi
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_STRICT_CONCURRENCY: complete
+    ENABLE_USER_SCRIPT_SANDBOXING: false
+
+packages:
+  SwiftTerm:
+    # 1.19+ attaches a build-tool plugin to the library target (needs plugin trust in
+    # Xcode / -skipPackagePluginValidation); 1.18 has every API the app uses.
+    url: https://github.com/migueldeicaza/SwiftTerm
+    minorVersion: "1.18.0"
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: "7.0.0"
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.6.0"
+
+targets:
+  Termi:
+    type: application
+    platform: macOS
+    sources:
+      - path: Termi
+        excludes:
+          - "AGENTS.md"
+          - "**/AGENTS.md"
+    settings:
+      base:
+        INFOPLIST_FILE: Termi/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Termi/Resources/Termi.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # The compiler writes the localizable strings it sees (one .stringsdata per source file):
+        # scripts/check-strings.py compares them with Localizable.xcstrings.
+        SWIFT_EMIT_LOC_STRINGS: "YES"
+    scheme:
+      testTargets:
+        - TermiTests
+    dependencies:
+      - package: SwiftTerm
+      - package: GRDB
+      - package: Sparkle
+    entitlements:
+      path: Termi/Resources/Termi.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.network.client: true
+        com.apple.security.files.user-selected.read-write: true
+
+  TermiTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: TermiTests
+        excludes:
+          - "AGENTS.md"
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+    dependencies:
+      - target: Termi

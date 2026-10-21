@@ -1,0 +1,16 @@
+# Port 22 of a test server: password and public key.
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+PermitRootLogin no
+AllowUsers tester
+UsePAM yes
+AllowTcpForwarding yes
+AllowAgentForwarding yes
+X11Forwarding no
+PrintMotd no
+Subsystem sftp /usr/lib/openssh/sftp-server
+PidFile /run/sshd.pid
+LogLevel VERBOSE

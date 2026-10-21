@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'Casks/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # What ships: built with the macOS 26 SDK, which is what gives the app Liquid Glass.
+          - name: Xcode 26
+            os: macos-26
+            xcode: '26'
+          # Compatibility: the same code must still compile and pass on the macOS 15 SDK and
+          # system, where the app simply has no glass effects.
+          - name: Xcode 16.2
+            os: macos-15
+            xcode: '16.2'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode ${{ matrix.xcode }}
+        run: |
+          app=$(ls -d /Applications/Xcode_${{ matrix.xcode }}*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)
+          if [ -z "$app" ]; then
+            echo "::error::No Xcode ${{ matrix.xcode }} on this runner"
+            ls /Applications | grep -i xcode || true
+            exit 1
+          fi
+          sudo xcode-select -s "$app"
+          xcodebuild -version
+
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
+          key: spm-${{ runner.os }}-xcode${{ matrix.xcode }}-${{ hashFiles('Termi.xcodeproj/project.pbxproj') }}
+          restore-keys: spm-${{ runner.os }}-xcode${{ matrix.xcode }}-
+
+      # Release, like `make build` / the release archive: some strict-concurrency
+      # diagnostics only show up with whole-module optimization.
+      - name: Build (Release)
+        run: |
+          set -o pipefail
+          if ! xcodebuild build \
+            -project Termi.xcodeproj \
+            -scheme Termi \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            > build.log 2>&1; then
+            grep -E "error:|fatal error" build.log | sort -u | head -300
+            tail -40 build.log
+            exit 1
+          fi
+          grep -E "/Termi/.*warning:" build.log | sort -u | head -100 || true
+          tail -3 build.log
+
+      - name: Test
+        run: |
+          set -o pipefail
+          if ! xcodebuild test \
+            -project Termi.xcodeproj \
+            -scheme Termi \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            > test.log 2>&1; then
+            grep -E "error:|fatal error|✘|failed|FAILED" test.log | sort -u | head -300
+            tail -60 test.log
+            exit 1
+          fi
+          grep -E "Test run with|Executed [0-9]+ test|TEST SUCCEEDED" test.log | tail -5
+
+      # Every string the code shows has a zh-Hans translation (an error if not); entries of the
+      # catalog that no source uses any more are reported as warnings.
+      - name: Localization
+        run: python3 scripts/check-strings.py Termi/Localizable.xcstrings ~/Library/Developer/Xcode/DerivedData Termi --github
+
+      # A crash of the test host (the app) only shows up as "Early unexpected exit";
+      # print the crashed thread from the macOS crash report.
+      - name: Crash reports
+        if: failure()
+        run: |
+          mkdir -p crashlogs
+          find ~/Library/Logs/DiagnosticReports -name 'Termi*' -newer build.log -exec cp {} crashlogs/ \; 2>/dev/null || true
+          for f in crashlogs/*; do
+            [ -f "$f" ] || continue
+            echo "== $f"
+            python3 - "$f" <<'PY'
+          import json, sys
+          text = open(sys.argv[1]).read()
+          _, _, body = text.partition("\n")
+          try:
+              report = json.loads(body)
+          except ValueError:
+              print(text[:6000])
+              sys.exit()
+          print("exception:", report.get("exception"))
+          print("termination:", report.get("termination"))
+          for key in ("asi", "lastExceptionBacktrace"):
+              if key in report:
+                  print(key, json.dumps(report[key])[:3000])
+          images = report.get("usedImages", [])
+          for thread in report.get("threads", []):
+              if thread.get("triggered"):
+                  print("crashed thread:", thread.get("queue", ""), thread.get("name", ""))
+                  for frame in thread.get("frames", [])[:40]:
+                      index = frame.get("imageIndex")
+                      image = images[index].get("name", "?") if index is not None and index < len(images) else "?"
+                      print("  %-28s %s +%s" % (image, frame.get("symbol", "?"), frame.get("symbolLocation", "")))
+          PY
+          done
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-logs-xcode${{ matrix.xcode }}
+          path: |
+            build.log
+            test.log
+            crashlogs/
+          if-no-files-found: ignore
+          retention-days: 7
