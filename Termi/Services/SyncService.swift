@@ -225,9 +225,9 @@ actor SyncService {
         )
 
         let envelopeData = try JSONEncoder().encode(envelope)
-        try envelopeData.write(to: fileURL, options: .atomic)
-        // The export password is all that protects the secrets in this file.
-        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        // The export password is all that protects the secrets in this file. Create it 0600
+        // rather than writing a world-readable temporary and chmod'ing afterwards.
+        try SSHRuntime.replacePrivateFile(envelopeData, at: fileURL)
         return unreadable
     }
 

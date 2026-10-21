@@ -1,5 +1,10 @@
 import Foundation
 import os.log
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// SSH Key generation using ssh-keygen
 actor SSHKeyGenerator {
@@ -113,16 +118,14 @@ actor SSHKeyGenerator {
             throw KeyGenError.importFailed(String(localized: "This is not a private key"))
         }
 
-        // Extract public key from private key
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        // Extract public key from private key. The work directory is 0700 and the key file is
+        // created 0600 — an atomic write into a default-mode directory left the PEM at 0644
+        // until chmod, in a temp folder other accounts can read.
+        let tempDir = try Self.makeWorkDirectory()
         let tempKeyPath = tempDir.appendingPathComponent("key").path
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        try privateKey.write(toFile: tempKeyPath, atomically: true, encoding: .utf8)
-
-        // Fix permissions (ssh-keygen requires 600)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tempKeyPath)
+        try SSHRuntime.writePrivateFile(privateKey, to: URL(fileURLWithPath: tempKeyPath))
 
         let (status, output) = try await runProcess(keygenPath, arguments: ["-y", "-f", tempKeyPath])
 
@@ -173,8 +176,7 @@ actor SSHKeyGenerator {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         // ssh-keygen rejects an OpenSSH-format key whose END line has no trailing newline.
-        try (trimmedPrivate + "\n").write(toFile: tempKeyPath, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tempKeyPath)
+        try SSHRuntime.writePrivateFile(trimmedPrivate + "\n", to: URL(fileURLWithPath: tempKeyPath))
 
         // Use provided public key or derive from private key
         let publicKey: String
@@ -315,11 +317,17 @@ actor SSHKeyGenerator {
 
     /// A private directory for the key files and the askpass socket, removed by the caller.
     /// The name is short because the path of a Unix socket is limited to about 100 bytes.
+    /// Creating with `withIntermediateDirectories: false` still fails if the name is taken.
+    /// `createDirectory`'s mode is masked by umask; the chmod afterwards is what makes it 0700.
     private static func makeWorkDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("termi-key-" + UUID().uuidString.prefix(8))
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false,
                                                 attributes: [.posixPermissions: 0o700])
+        guard chmod(url.path, 0o700) == 0 else {
+            try? FileManager.default.removeItem(at: url)
+            throw SSHError.invalidConfiguration("Cannot secure \(url.lastPathComponent)")
+        }
         return url
     }
 

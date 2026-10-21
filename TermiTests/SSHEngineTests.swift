@@ -1,5 +1,10 @@
 import Testing
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 @testable import Termi
 
 // Integration tests for the SSH engine (against a real sshd) live outside the app test target;
@@ -169,6 +174,15 @@ private let waitingSSH = #"""
 known=$(sed -n 's/^  UserKnownHostsFile "\(.*\)"$/\1/p' "$2" | head -n 1)
 echo "termi-h0 ssh-ed25519 AAAAnew" >> "$known"
 exec sleep 30
+"""#
+
+/// Creates the control socket, records its pid, and stays up — a master nobody closed.
+private let lingeringSSH = #"""
+for arg in "$@"; do [ "$arg" = "-O" ] && exit 0; done
+control=$(sed -n 's/^  ControlPath "\(.*\)"$/\1/p' "$2" | head -n 1)
+: > "$control"
+echo $$ > "$(dirname "$control")/pid"
+exec sleep 60
 """#
 
 /// A runtime in a temporary directory of its own whose "ssh" is the given shell script.
@@ -910,4 +924,68 @@ private func savedPasswords(answering answers: [SSHPromptResponse]) async throws
     #expect(try await SecureStoreService.shared.getHostPassword(hostId: hostId) == "fresh")
 
     try await ConnectionLogRepository.shared.deleteHostWithHistory(hostId: hostId)
+}
+
+@Test func droppingAMasterStopsItsSSH() async throws {
+    let (runtime, root) = try stubRuntime(ssh: lingeringSSH)
+    defer {
+        runtime.shutdown()
+        try? FileManager.default.removeItem(at: root)
+    }
+    var leaked: Int32 = 0
+    defer { if leaked > 0, SSHRuntime.isProcessAlive(leaked) { kill(leaked, SIGKILL) } }
+
+    let callbacks = SSHMasterConnection.Callbacks(prompt: { _ in SSHPromptResponse.cancel })
+    var master: SSHMasterConnection? = try SSHMasterConnection(
+        spec: SSHConnectionSpec(hops: [hop("termi-h0")]), runtime: runtime, callbacks: callbacks)
+    try await master?.connect()
+    let directory = try #require(master).directory
+    let pidURL = directory.appendingPathComponent("pid")
+    var polls = 0
+    while !FileManager.default.fileExists(atPath: pidURL.path), polls < 50 {
+        try await Task.sleep(nanoseconds: 20_000_000)
+        polls += 1
+    }
+    let text = try String(contentsOf: pidURL, encoding: .utf8)
+    let pid = try #require(Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+    leaked = pid
+    #expect(SSHRuntime.isProcessAlive(pid))
+    master = nil
+    polls = 0
+    while SSHRuntime.isProcessAlive(pid), polls < 40 {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        polls += 1
+    }
+    #expect(!SSHRuntime.isProcessAlive(pid))
+}
+
+@Test func staleControlSocketCleanupDoesNotWaitOnAHungSSH() throws {
+    let parent = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-Stale-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: parent) }
+
+    var dead: Int32 = 200_000
+    while dead < 2_000_000, SSHRuntime.isProcessAlive(dead) { dead += 1 }
+    let runtimeDir = parent.appendingPathComponent("bmt-\(dead)")
+    let connection = runtimeDir.appendingPathComponent("c1")
+    try FileManager.default.createDirectory(at: connection, withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: connection.appendingPathComponent("s").path, contents: Data())
+
+    let pidFile = parent.appendingPathComponent("child.pid")
+    let ssh = parent.appendingPathComponent("ssh")
+    // The shebang has to be the first bytes of the file. `exec` keeps this pid, so the signal
+    // hits the sleep itself and does not leave a grandchild behind.
+    try "#!/bin/sh\necho $$ > '\(pidFile.path)'\nexec sleep 30\n"
+        .write(to: ssh, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ssh.path)
+
+    let started = Date()
+    SSHRuntime.cleanupStaleDirectories(in: parent, sshPath: ssh.path, exitTimeout: 0.3)
+    #expect(Date().timeIntervalSince(started) < 3)
+    #expect(!FileManager.default.fileExists(atPath: runtimeDir.path))
+    let text = try String(contentsOf: pidFile, encoding: .utf8)
+    let pid = try #require(Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+    defer { if SSHRuntime.isProcessAlive(pid) { kill(pid, SIGKILL) } }
+    #expect(!SSHRuntime.isProcessAlive(pid))
 }

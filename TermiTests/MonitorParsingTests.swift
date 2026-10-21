@@ -144,3 +144,93 @@ import Foundation
     #expect(stats.networkRx == 1000)
     #expect(stats.networkTx == 2000)
 }
+
+// MARK: - macOS probes and a command that does not drop sections
+
+@Test func statsCommandKeepsEverySection() {
+    let command = MonitorService.statsCommand
+    #expect(command.contains("echo \"===HOSTNAME===\";"))
+    #expect(command.contains("echo \"===UPTIME===\";"))
+    #expect(command.contains("echo \"===LOADAVG===\";"))
+    #expect(command.contains("echo \"===MEM===\";"))
+    #expect(command.contains("echo \"===DISK===\";"))
+    #expect(command.contains("echo \"===CPU===\";"))
+    #expect(command.contains("echo \"===NET===\";"))
+    // `&&` would skip every later section when one probe fails.
+    #expect(!command.contains("&&"))
+    // A pipeline's status is `head`'s, so `top | head || other-top` never reaches the fallback,
+    // and SIGPIPE from `head` would launch the other top on Linux too. Fall back only when the
+    // first probe printed nothing.
+    #expect(command.contains("if [ -z \"$cpu\" ]"))
+    #expect(command.contains("top -bn1"))
+    #expect(command.contains("top -l1"))
+    #expect(!command.contains("| head -5 ||"))
+    #expect(!command.contains("| tail"))
+    #expect(command.contains("if [ -r /proc/net/dev ]"))
+}
+
+@Test func parseLoadAverageFromSysctlBraces() async {
+    let monitor = MonitorService()
+    let output = """
+    ===LOADAVG===
+    { 1.25 0.50 0.10 }
+    """
+    let stats = await monitor.parseStats(output)
+    #expect(stats.loadAvg1 == 1.25)
+    #expect(stats.loadAvg5 == 0.50)
+    #expect(stats.loadAvg15 == 0.10)
+}
+
+@Test func parseMemoryFromVMStat() async {
+    let monitor = MonitorService()
+    let raw = """
+    Mach Virtual Memory Statistics: (page size of 4096 bytes)
+    Pages free:                               1000.
+    Pages active:                             2000.
+    Pages inactive:                            300.
+    Pages speculative:                          50.
+    Pages wired down:                          400.
+    Pages occupied by compressor:              100.
+    """
+    var stats = MonitorService.ServerStats()
+    await monitor.parseMemory(raw, stats: &stats)
+    // 3850 pages total, 2500 of them active + wired + compressed.
+    #expect(stats.memTotal == 15_769_600)
+    #expect(stats.memUsed == 10_240_000)
+    #expect(stats.memPercent > 64 && stats.memPercent < 66)
+}
+
+@Test func parseDiskKilobyteBlocksAndWrappedName() async {
+    let monitor = MonitorService()
+    let kilobytes = """
+    Filesystem 1024-blocks Used Available Capacity Mounted on
+    /dev/disk1 1000 250 750 25% /
+    """
+    var stats = MonitorService.ServerStats()
+    await monitor.parseDisk(kilobytes, stats: &stats)
+    #expect(stats.diskTotal == 1_024_000)
+    #expect(stats.diskUsed == 256_000)
+    #expect(stats.diskPercent > 24 && stats.diskPercent < 26)
+
+    let wrapped = """
+    Filesystem     1K-blocks      Used Available Use% Mounted on
+    /dev/mapper/very-long-volume-name
+    2000 500 1500 25% /
+    """
+    stats = MonitorService.ServerStats()
+    await monitor.parseDisk(wrapped, stats: &stats)
+    #expect(stats.diskTotal == 2_048_000)
+    #expect(stats.diskUsed == 512_000)
+}
+
+@Test func parseCPUFromMacOSTop() async {
+    let monitor = MonitorService()
+    let raw = """
+    Processes: 412 total, 2 running, 410 sleeping, 2000 threads
+    CPU usage: 5.23% user, 8.10% sys, 86.67% idle
+    """
+    var stats = MonitorService.ServerStats()
+    await monitor.parseCPU(raw, stats: &stats)
+    #expect(stats.cpuUsage > 13 && stats.cpuUsage < 14)
+    #expect(stats.processes == 412)
+}

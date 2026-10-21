@@ -98,8 +98,14 @@ final class SSHMasterConnection: @unchecked Sendable {
     }
 
     deinit {
-        // Not just the files: the process may outlive this object, and then nobody else
-        // unregisters the askpass token.
+        // Dropping the object without close() (a cancelled connect that lost the entry, or the
+        // last reference going away mid-flight) used to delete the control socket and leave ssh
+        // running with nobody to answer its prompts. Signal it first. finish() still unregisters
+        // the askpass token, which nobody else will.
+        let running = lock.withLock { process }
+        if let running {
+            SSHRuntime.stop(running, grace: 1)
+        }
         finish()
     }
 

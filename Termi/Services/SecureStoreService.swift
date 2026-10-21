@@ -2,6 +2,11 @@ import Foundation
 import CryptoKit
 import GRDB
 import os.log
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// App-managed encrypted credential storage backed by the local database.
 actor SecureStoreService {
@@ -440,15 +445,26 @@ actor SecureStoreService {
             return SymmetricKey(data: existing)
         }
 
-        // First launch — generate a random key and persist it
+        // First launch — generate a random key and persist it. Two launches can both see a
+        // missing file: the loser keeps the winner's key. Overwriting it would make every
+        // secret the winner already wrote unreadable.
         let key = SymmetricKey(size: .bits256)
         let keyData = key.withUnsafeBytes { Data($0) }
+        let url = try Self.vaultKeyFileURL()
         do {
-            try saveFileVaultKey(keyData)
+            try Self.persistNewVaultKey(keyData, to: url)
+            logger.info("Vault key saved to local file (permissions 0600)")
+            return key
+        } catch SSHRuntime.PrivateFileError.alreadyExists {
+            if let existing = try readFileVaultKey() {
+                return SymmetricKey(data: existing)
+            }
+            throw SecureStoreError.vaultKeyWriteFailed(underlying: SSHRuntime.PrivateFileError.alreadyExists)
+        } catch let error as SecureStoreError {
+            throw error
         } catch {
             throw SecureStoreError.vaultKeyWriteFailed(underlying: error)
         }
-        return key
     }
 
     /// Path: <profile folder>/.vault-key (~/Library/Application Support/Termi/.vault-key in
@@ -472,20 +488,43 @@ actor SecureStoreService {
         return data
     }
 
-    /// Persists the vault key to disk. Throws on failure — the caller MUST handle this,
+    /// Persists a new vault key to `url`. Throws on failure — the caller MUST handle this,
     /// because an unpersisted key means all encrypted data becomes unrecoverable after restart.
-    private func saveFileVaultKey(_ keyData: Data) throws {
-        let url = try Self.vaultKeyFileURL()
-        let dir = url.deletingLastPathComponent()
-
-        // Create directory with 0700 (owner-only access)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [
+    ///
+    /// The file is created `O_EXCL` at 0600 before any byte is written. An atomic `Data.write`
+    /// created a 0644 temporary file and only then chmod'd it; in a profile folder that was
+    /// still the default 0755, that window let every other account read the key. The 32 bytes
+    /// on disk are unchanged.
+    nonisolated static func persistNewVaultKey(_ keyData: Data, to url: URL) throws {
+        guard keyData.count == 32 else {
+            throw SecureStoreError.vaultKeyCorrupted(path: url.path)
+        }
+        let directory = url.deletingLastPathComponent()
+        // 0700 even when the folder already exists: createDirectory's attributes do not apply then.
+        // The standard profile is created by the database without a mode; isolated profiles already
+        // use 0700. chmod is best-effort so a filesystem that rejects it still gets a 0600 key file.
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [
             .posixPermissions: 0o700
         ])
-        // Write key file with 0600 (owner read/write only)
-        try keyData.write(to: url, options: [.atomic, .completeFileProtection])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        logger.info("Vault key saved to local file (permissions 0600)")
+        _ = chmod(directory.path, 0o700)
+        // `open(O_EXCL)` publishes the name before the bytes are written. Link the finished
+        // file into place instead, so a second launch never reads a half-written key and then
+        // treats it as corruption (which would refuse to start).
+        let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
+        do {
+            try SSHRuntime.createPrivateFile(keyData, at: temporary, permissions: 0o600, sync: true)
+            if link(temporary.path, url.path) != 0 {
+                let error = errno
+                throw error == EEXIST
+                    ? SSHRuntime.PrivateFileError.alreadyExists
+                    : SSHRuntime.PrivateFileError.io(
+                        "Cannot publish \(url.lastPathComponent): \(String(cString: strerror(error)))")
+            }
+        } catch {
+            unlink(temporary.path)
+            throw error
+        }
+        unlink(temporary.path)
     }
 
     private func upsertVaultValue(_ encryptedValue: String, for key: String) async throws {
