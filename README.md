@@ -182,4 +182,4 @@ Operating-system marks on host tiles come from [Simple Icons](https://simpleicon
 
 ## License
 
-A license has not been chosen yet. This repository has no `LICENSE` file.
+Termi is released under the [MIT License](LICENSE).
