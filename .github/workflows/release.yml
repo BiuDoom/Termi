@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    # The macOS 26 SDK is what gives the released app Liquid Glass; built with an older SDK it
+    # runs in the compatibility appearance on macOS 26 as well.
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          app=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)
+          if [ -z "$app" ]; then
+            echo "::error::No Xcode 26 on this runner"
+            ls /Applications | grep -i xcode || true
+            exit 1
+          fi
+          sudo xcode-select -s "$app"
+          xcodebuild -version
+
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
+          key: spm-${{ runner.os }}-xcode26-${{ hashFiles('Termi.xcodeproj/project.pbxproj') }}
+          restore-keys: spm-${{ runner.os }}-xcode26-
+
+      - name: Extract version and verify match
+        id: version
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag || '' }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG_VERSION="${INPUT_TAG#v}"
+          else
+            TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+          PROJECT_VERSION=$(grep MARKETING_VERSION Termi.xcodeproj/project.pbxproj \
+            | head -1 | sed 's/.*= *\(.*\);/\1/' | tr -d ' ')
+          echo "Tag version: $TAG_VERSION"
+          echo "Project version: $PROJECT_VERSION"
+          if [ "$TAG_VERSION" != "$PROJECT_VERSION" ]; then
+            echo "::error::Version mismatch! Tag=$TAG_VERSION but MARKETING_VERSION=$PROJECT_VERSION"
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Archive and export app
+        run: bash scripts/build-release.sh
+
+      - name: Create DMG
+        run: bash scripts/create-dmg.sh
+
+      - name: Compute SHA-256
+        id: sha
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          DMG_PATH="build/Termi-${VERSION}.dmg"
+          SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "dmg_path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+          echo "SHA-256: $SHA"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DMG_PATH: ${{ steps.sha.outputs.dmg_path }}
+          SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          DMG_SIZE=$(du -h "$DMG_PATH" | cut -f1)
+
+          gh release create "v${VERSION}" "$DMG_PATH" \
+            --title "Termi v${VERSION}" \
+            --notes "$(cat <<EOF
+          ## Termi v${VERSION}
+
+          ### Download
+
+          | File | Size | SHA-256 |
+          |------|------|---------|
+          | \`Termi-${VERSION}.dmg\` | ${DMG_SIZE} | \`${SHA256}\` |
+
+          ### Install
+
+          1. Download \`Termi-${VERSION}.dmg\`
+          2. Open the DMG and drag **Termi** to **Applications**
+          3. First launch: right-click → Open (macOS Gatekeeper)
+
+          ### Verify integrity
+
+          \`\`\`bash
+          shasum -a 256 Termi-${VERSION}.dmg
+          # Expected: ${SHA256}
+          \`\`\`
+          EOF
+          )"

@@ -1,0 +1,88 @@
+{
+  "hosts": [
+    {
+      "label": "test-a",
+      "address": "127.0.0.1",
+      "port": 2222,
+      "user": "tester",
+      "auth": {
+        "type": "key",
+        "keyName": "test-env plain",
+        "keyFile": "@TEST_ENV@/id_plain"
+      },
+      "hostKeyFile": "@TEST_ENV@/hostkeys/a/ssh_host_ed25519_key.pub"
+    },
+    {
+      "label": "test-pass",
+      "address": "127.0.0.1",
+      "port": 2222,
+      "user": "tester",
+      "auth": {
+        "type": "key",
+        "keyName": "test-env passphrase",
+        "keyFile": "@TEST_ENV@/id_passphrase",
+        "passphraseFile": "@TEST_ENV@/key_passphrase"
+      },
+      "hostKeyFile": "@TEST_ENV@/hostkeys/a/ssh_host_ed25519_key.pub"
+    },
+    {
+      "label": "test-pw",
+      "address": "127.0.0.1",
+      "port": 2222,
+      "user": "tester",
+      "auth": {
+        "type": "password",
+        "passwordFile": "@TEST_ENV@/tester_password"
+      },
+      "startupSnippet": {
+        "name": "test-env: where am I",
+        "command": "echo \"$(whoami)@$(hostname)\""
+      },
+      "hostKeyFile": "@TEST_ENV@/hostkeys/a/ssh_host_ed25519_key.pub"
+    },
+    {
+      "label": "test-agent",
+      "address": "127.0.0.1",
+      "port": 2222,
+      "user": "tester",
+      "auth": {
+        "type": "agent"
+      },
+      "hostKeyFile": "@TEST_ENV@/hostkeys/a/ssh_host_ed25519_key.pub"
+    },
+    {
+      "label": "test-kbd",
+      "address": "127.0.0.1",
+      "port": 2224,
+      "user": "tester",
+      "auth": {
+        "type": "password"
+      },
+      "hostKeyFile": "@TEST_ENV@/hostkeys/a/ssh_host_ed25519_key.pub"
+    },
+    {
+      "label": "jump",
+      "address": "127.0.0.1",
+      "port": 2223,
+      "user": "tester",
+      "auth": {
+        "type": "key",
+        "keyName": "test-env plain",
+        "keyFile": "@TEST_ENV@/id_plain"
+      },
+      "hostKeyFile": "@TEST_ENV@/hostkeys/jump/ssh_host_ed25519_key.pub"
+    },
+    {
+      "label": "inner",
+      "address": "inner",
+      "port": 22,
+      "user": "tester",
+      "auth": {
+        "type": "password",
+        "passwordFile": "@TEST_ENV@/tester_password"
+      },
+      "jump": "jump",
+      "hostKeyFile": "@TEST_ENV@/hostkeys/inner/ssh_host_ed25519_key.pub"
+    }
+  ]
+}

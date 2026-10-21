@@ -1,0 +1,12 @@
+# Port 2224 of a test server: keyboard-interactive only (PAM asks "Password:"), so that the
+# app's prompt for it can be checked without a password or key getting in first.
+Port 2224
+HostKey /etc/ssh/ssh_host_ed25519_key
+PasswordAuthentication no
+KbdInteractiveAuthentication yes
+PubkeyAuthentication no
+PermitRootLogin no
+AllowUsers tester
+UsePAM yes
+Subsystem sftp /usr/lib/openssh/sftp-server
+PidFile /run/sshd-kbd.pid
