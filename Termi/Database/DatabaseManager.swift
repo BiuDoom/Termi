@@ -1,6 +1,11 @@
 import GRDB
 import Foundation
 import os.log
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 actor DatabaseManager {
     static let shared = DatabaseManager()
@@ -11,7 +16,11 @@ actor DatabaseManager {
     private var databasePath: String {
         get throws {
             let profile = AppProfile.current
-            try FileManager.default.createDirectory(at: profile.directory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: profile.directory, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            // Attributes are ignored when the folder already exists. The standard profile used to
+            // be created with the default mode (0755), which lets every account on this Mac list it.
+            _ = chmod(profile.directory.path, 0o700)
             return profile.databaseURL.path
         }
     }
@@ -63,6 +72,8 @@ actor DatabaseManager {
 
         guard let pool = dbPool else { return }
         try Migrations.run(pool)
+        // SQLite creates the file (and the wal) with the process umask, usually 0644.
+        Self.restrictDatabaseFiles(at: path)
         logger.info("Database migrations complete")
     }
 
@@ -110,6 +121,9 @@ actor DatabaseManager {
             try await database.writeWithoutTransaction { db in
                 try db.execute(sql: "VACUUM INTO ?", arguments: [path])
             }
+            // SQLite creates the copy with the process umask (usually 0644). Tighten it before
+            // anything else opens the file, and again after it takes its final name.
+            _ = chmod(partial.path, 0o600)
             // A backup that would not restore is reported now, not when it is needed.
             do {
                 try checkDatabaseFile(at: partial)
@@ -121,6 +135,7 @@ actor DatabaseManager {
             } else {
                 try fm.moveItem(at: partial, to: url)
             }
+            _ = chmod(url.path, 0o600)
         } catch {
             // Only the unfinished copy written above.
             try? fm.removeItem(at: partial)
@@ -264,6 +279,14 @@ actor DatabaseManager {
             }
             for suffix in movedLogs { try? fm.moveItem(atPath: kept + suffix, toPath: path + suffix) }
             throw error
+        }
+    }
+
+    /// Owner-read/write on the database and its wal/shm. The profile folder is tightened to 0700
+    /// where the path is chosen (`databasePath`); this covers the files SQLite itself creates.
+    static func restrictDatabaseFiles(at path: String) {
+        for suffix in ["", "-wal", "-shm"] where FileManager.default.fileExists(atPath: path + suffix) {
+            _ = chmod(path + suffix, 0o600)
         }
     }
 

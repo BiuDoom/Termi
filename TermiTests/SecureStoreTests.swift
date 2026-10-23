@@ -769,3 +769,116 @@ private func importFails(_ generator: SSHKeyGenerator, text: String) async -> Bo
     // The import replaces this Mac's history (its transcripts stay for a roll back).
     #expect(localRows == 0)
 }
+
+// MARK: - Secret files are owner-only from the first byte
+
+private func posixMode(_ path: String) throws -> Int {
+    let attributes = try FileManager.default.attributesOfItem(atPath: path)
+    let raw: Int
+    if let number = attributes[.posixPermissions] as? NSNumber {
+        raw = number.intValue
+    } else if let mode = attributes[.posixPermissions] as? Int {
+        raw = mode
+    } else {
+        throw CocoaError(.fileReadUnknown)
+    }
+    return raw & 0o777
+}
+
+private func isPrivateFileAlreadyExists(_ error: any Error) -> Bool {
+    if case SSHRuntime.PrivateFileError.alreadyExists = error { return true }
+    return false
+}
+
+private func isVaultKeyCorrupted(_ error: any Error) -> Bool {
+    if case SecureStoreService.SecureStoreError.vaultKeyCorrupted = error { return true }
+    return false
+}
+
+@Test func privateFileIsCreatedAtTheRequestedModeAndNotReplaced() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-Tests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    // 0666 is what an atomic Data.write asks for; umask would turn that into 0644 without fchmod.
+    let created = folder.appendingPathComponent("created")
+    try SSHRuntime.createPrivateFile(Data("one".utf8), at: created, permissions: 0o666)
+    #expect(try posixMode(created.path) == 0o666)
+    #expect(try Data(contentsOf: created) == Data("one".utf8))
+
+    let rejected = Result { try SSHRuntime.createPrivateFile(Data("two".utf8), at: created) }
+    if case .failure(let error) = rejected {
+        #expect(isPrivateFileAlreadyExists(error))
+    } else {
+        Issue.record("a second create replaced the file")
+    }
+    #expect(try Data(contentsOf: created) == Data("one".utf8))
+
+    let target = folder.appendingPathComponent("target")
+    try Data("keep".utf8).write(to: target)
+    let link = folder.appendingPathComponent("link")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+    let followed = Result { try SSHRuntime.createPrivateFile(Data("nope".utf8), at: link) }
+    if case .success = followed { Issue.record("wrote through a symlink") }
+    #expect(try Data(contentsOf: target) == Data("keep".utf8))
+
+    let replaced = folder.appendingPathComponent("replaced")
+    try Data("old".utf8).write(to: replaced)
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: replaced.path)
+    try SSHRuntime.replacePrivateFile(Data("new".utf8), at: replaced)
+    #expect(try Data(contentsOf: replaced) == Data("new".utf8))
+    #expect(try posixMode(replaced.path) == 0o600)
+    let leftovers = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        .filter { $0.hasPrefix(".replaced.") }
+    #expect(leftovers.isEmpty)
+}
+
+@Test func vaultKeyFileIsOwnerOnlyAndNeverOverwritten() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-Tests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+
+    let url = folder.appendingPathComponent(".vault-key")
+    let key = Data(repeating: 0xAB, count: 32)
+    try SecureStoreService.persistNewVaultKey(key, to: url)
+    #expect(try Data(contentsOf: url) == key)
+    #expect(try posixMode(url.path) == 0o600)
+    #expect(try posixMode(folder.path) == 0o700)
+    let unpublished = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        .filter { $0.hasPrefix(".vault-key.") }
+    #expect(unpublished.isEmpty)
+
+    let rejected = Result { try SecureStoreService.persistNewVaultKey(Data(repeating: 0xCD, count: 32), to: url) }
+    if case .failure(let error) = rejected {
+        #expect(isPrivateFileAlreadyExists(error))
+    } else {
+        Issue.record("a second launch overwrote the vault key")
+    }
+    #expect(try Data(contentsOf: url) == key)
+
+    let short = Result { try SecureStoreService.persistNewVaultKey(Data(repeating: 1, count: 16), to: url) }
+    if case .failure(let error) = short {
+        #expect(isVaultKeyCorrupted(error))
+    } else {
+        Issue.record("stored a key that is not 32 bytes")
+    }
+}
+
+@Test func databaseFilesAreRestrictedToTheOwner() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-Tests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let database = folder.appendingPathComponent("termi.db")
+    try Data("sqlite".utf8).write(to: database)
+    try Data("wal".utf8).write(to: folder.appendingPathComponent("termi.db-wal"))
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: database.path)
+    try FileManager.default.setAttributes([.posixPermissions: 0o644],
+                                          ofItemAtPath: folder.appendingPathComponent("termi.db-wal").path)
+    DatabaseManager.restrictDatabaseFiles(at: database.path)
+    #expect(try posixMode(database.path) == 0o600)
+    #expect(try posixMode(folder.appendingPathComponent("termi.db-wal").path) == 0o600)
+}
