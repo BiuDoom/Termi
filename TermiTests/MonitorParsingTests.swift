@@ -167,6 +167,45 @@ import Foundation
     #expect(!command.contains("| head -5 ||"))
     #expect(!command.contains("| tail"))
     #expect(command.contains("if [ -r /proc/net/dev ]"))
+    // `head -20` stopped before a Mac's physical interface, so the network counters stayed 0.
+    #expect(command.contains("netstat -ib"))
+    #expect(command.contains("head -n 400"))
+    #expect(!command.contains("head -20"))
+    #expect(!command.contains("head -5"))
+}
+
+@Test func parseNetworkFromMacOSNetstat() async {
+    let monitor = MonitorService()
+    // Link rows carry the interface totals. Address rows repeat them (and put `-` in the error
+    // columns); a MAC address contains colons, which the old `/proc/net/dev` split treated as
+    // the field separator and then dropped the row.
+    let raw = """
+    Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll
+    lo0        16384 <Link#1>                        177074     0   18523456   177074     0   18523456     0
+    lo0        16384 127           localhost         177074     -   18523456   177074     -   18523456     -
+    lo0        16384 localhost   ::1                 177074     -   18523456   177074     -   18523456     -
+    gif0*      1280  <Link#2>                             0     0          0        0     0          0     0
+    en0        1500  <Link#14>   a4:83:e7:8b:12:34  1000000     0 5000000000   800000     0 2000000000     0
+    en0        1500  192.168.1     192.168.1.20      1000000     - 5000000000   800000     - 2000000000     -
+    en0        1500  fe80::a6:83 fe80:e::a6:83:e7  1000000     - 5000000000   800000     - 2000000000     -
+    """
+
+    var stats = MonitorService.ServerStats()
+    await monitor.parseNetwork(raw, stats: &stats)
+
+    let rx: Int64 = 18_523_456 + 5_000_000_000
+    let tx: Int64 = 18_523_456 + 2_000_000_000
+    #expect(stats.networkRx == rx)
+    #expect(stats.networkTx == tx)
+}
+
+@Test func parseNetworkLinkRowWithoutCollisionColumn() async {
+    let monitor = MonitorService()
+    let raw = "em0 1500 <Link#1> 00:11:22:33:44:55 10 0 1000 20 0 2000\n"
+    var stats = MonitorService.ServerStats()
+    await monitor.parseNetwork(raw, stats: &stats)
+    #expect(stats.networkRx == 1000)
+    #expect(stats.networkTx == 2000)
 }
 
 @Test func parseLoadAverageFromSysctlBraces() async {

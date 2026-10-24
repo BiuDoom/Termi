@@ -30,6 +30,10 @@ actor MonitorService {
     /// never ran the fallback — `head` exits 0 on empty input — and `top | head` itself makes a
     /// successful `top` exit from SIGPIPE, which would then launch the other `top` as well.
     /// CPU falls back only when the first probe printed nothing.
+    /// Network counters come from `/proc/net/dev` when that file is readable, and from
+    /// `netstat -ib` otherwise (macOS). `head` only bounds a runaway listing: 400 lines still
+    /// include the physical interface. `head -20` ended while the listing was still on loopback
+    /// and virtual interfaces, so the counters that remained were parsed as zero.
     nonisolated static let statsCommand = """
     echo "===HOSTNAME==="; hostname
     echo "===UPTIME==="; uptime
@@ -37,7 +41,7 @@ actor MonitorService {
     echo "===MEM==="; free -b 2>/dev/null || vm_stat
     echo "===DISK==="; df -B1 / 2>/dev/null || df -k /
     echo "===CPU==="; cpu=$(top -bn1 2>/dev/null | head -10); if [ -z "$cpu" ]; then cpu=$(top -l1 2>/dev/null | head -10); fi; printf '%s\\n' "$cpu"
-    echo "===NET==="; if [ -r /proc/net/dev ]; then tail -n +3 /proc/net/dev; else netstat -ib 2>/dev/null | head -20; fi
+    echo "===NET==="; if [ -r /proc/net/dev ]; then tail -n +3 /proc/net/dev; else netstat -ib 2>/dev/null | head -n 400; fi
     """
 
     /// Gather all server stats in one SSH call
@@ -212,16 +216,40 @@ actor MonitorService {
     }
 
     func parseNetwork(_ raw: String, stats: inout ServerStats) {
-        // Linux /proc/net/dev — sum all interfaces
-        let lines = raw.components(separatedBy: "\n")
-        for line in lines {
-            let parts = line.components(separatedBy: ":").last?
-                .components(separatedBy: " ").filter { !$0.isEmpty } ?? []
-            if parts.count >= 9 {
-                stats.networkRx += Int64(parts[safe: 0] ?? "") ?? 0
-                stats.networkTx += Int64(parts[safe: 8] ?? "") ?? 0
-            }
+        for line in raw.components(separatedBy: "\n") {
+            let counters = Self.procNetDevCounters(line) ?? Self.netstatLinkCounters(line)
+            guard let counters else { continue }
+            stats.networkRx += counters.rx
+            stats.networkTx += counters.tx
         }
+    }
+
+    /// One `/proc/net/dev` row: `eth0: <rx bytes> … <tx bytes>`. The name is the text before the
+    /// first colon, so a `netstat` row whose address contains colons is not read as this format.
+    /// Receive bytes are field 0 after the colon; transmit bytes are field 8.
+    private static func procNetDevCounters(_ line: String) -> (rx: Int64, tx: Int64)? {
+        guard let colon = line.firstIndex(of: ":") else { return nil }
+        let name = line[..<colon].trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, name.allSatisfy({ !$0.isWhitespace }) else { return nil }
+        let fields = line[line.index(after: colon)...].split(whereSeparator: \.isWhitespace).map(String.init)
+        guard fields.count >= 9, let rx = Int64(fields[0]), let tx = Int64(fields[8]) else { return nil }
+        return (rx, tx)
+    }
+
+    /// One `netstat -ib` link row. The row ends in `Ipkts Ierrs Ibytes Opkts Oerrs Obytes`, and
+    /// `Coll` when the system prints it. Address rows repeat those counters, so only `<Link#>`
+    /// rows are summed — once per interface.
+    private static func netstatLinkCounters(_ line: String) -> (rx: Int64, tx: Int64)? {
+        guard line.contains("<Link#") else { return nil }
+        var numbers: [Int64] = []
+        for token in line.split(whereSeparator: \.isWhitespace).reversed() {
+            guard let value = Int64(token) else { break }
+            numbers.append(value)
+            if numbers.count == 7 { break }
+        }
+        guard numbers.count == 6 || numbers.count == 7 else { return nil }
+        let ordered = Array(numbers.reversed())
+        return (ordered[2], ordered[5])
     }
 
     private func executeSSH(host: Host, command: String) async throws -> String {
