@@ -176,18 +176,34 @@ import Foundation
 
 @Test func parseNetworkFromMacOSNetstat() async {
     let monitor = MonitorService()
-    // Link rows carry the interface totals. Address rows repeat them (and put `-` in the error
-    // columns); a MAC address contains colons, which the old `/proc/net/dev` split treated as
-    // the field separator and then dropped the row.
+    // Link rows carry the interface totals. lo0 omits Address; en0's MAC contains colons.
+    // The address row repeats en0's counters as plain integers — summing it would double the rate.
+    // Drop is present, so the last seven fields are not Ipkts…Coll.
     let raw = """
-    Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll
-    lo0        16384 <Link#1>                        177074     0   18523456   177074     0   18523456     0
-    lo0        16384 127           localhost         177074     -   18523456   177074     -   18523456     -
-    lo0        16384 localhost   ::1                 177074     -   18523456   177074     -   18523456     -
-    gif0*      1280  <Link#2>                             0     0          0        0     0          0     0
-    en0        1500  <Link#14>   a4:83:e7:8b:12:34  1000000     0 5000000000   800000     0 2000000000     0
-    en0        1500  192.168.1     192.168.1.20      1000000     - 5000000000   800000     - 2000000000     -
-    en0        1500  fe80::a6:83 fe80:e::a6:83:e7  1000000     - 5000000000   800000     - 2000000000     -
+    Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll Drop
+    lo0 16384 <Link#1> 869107 0 169411755 869107 0 169411755 0 0
+    lo0 16384 127 localhost 869107 - 169411755 869107 - 169411755 - -
+    gif0* 1280 <Link#2> 0 0 0 0 0 0 0 0
+    en0 1500 <Link#4> a4:5e:60:aa:bb:cc 20481 0 86175096 64485 0 10090152 0 0
+    en0 1500 192.168.1 192.168.1.20 20481 0 86175096 64485 0 10090152 0 0
+    """
+
+    var stats = MonitorService.ServerStats()
+    await monitor.parseNetwork(raw, stats: &stats)
+
+    let rx: Int64 = 169_411_755 + 86_175_096
+    let tx: Int64 = 169_411_755 + 10_090_152
+    #expect(stats.networkRx == rx)
+    #expect(stats.networkTx == tx)
+}
+
+@Test func parseNetworkFromMacOSNetstatWithoutDropColumn() async {
+    let monitor = MonitorService()
+    let raw = """
+    Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
+    lo0 16384 <Link#1> 177074 0 18523456 177074 0 18523456 0
+    en0 1500 <Link#14> a4:83:e7:8b:12:34 1000000 0 5000000000 800000 0 2000000000 0
+    en0 1500 192.168.1 192.168.1.20 1000000 0 5000000000 800000 0 2000000000 0
     """
 
     var stats = MonitorService.ServerStats()

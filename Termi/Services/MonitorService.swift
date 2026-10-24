@@ -216,7 +216,15 @@ actor MonitorService {
     }
 
     func parseNetwork(_ raw: String, stats: inout ServerStats) {
-        for line in raw.components(separatedBy: "\n") {
+        let lines = raw.components(separatedBy: "\n")
+        // `netstat -ib` names its columns. Counting from the left is wrong: the Address column
+        // is missing on link rows that have no MAC, and some releases add a Drop column.
+        if let totals = Self.netstatTotals(lines) {
+            stats.networkRx += totals.rx
+            stats.networkTx += totals.tx
+            return
+        }
+        for line in lines {
             let counters = Self.procNetDevCounters(line) ?? Self.netstatLinkCounters(line)
             guard let counters else { continue }
             stats.networkRx += counters.rx
@@ -236,18 +244,46 @@ actor MonitorService {
         return (rx, tx)
     }
 
-    /// One `netstat -ib` link row. The row ends in `Ipkts Ierrs Ibytes Opkts Oerrs Obytes`, and
-    /// `Coll` when the system prints it. Address rows repeat those counters, so only `<Link#>`
-    /// rows are summed — once per interface.
+    /// Sum of `<Link#>` rows. Address rows repeat the same counters, so they are not added.
+    /// Column indexes are distances from the right edge of the header, which stay put when
+    /// Address is omitted. Returns nil when this is not `netstat` output.
+    private static func netstatTotals(_ lines: [String]) -> (rx: Int64, tx: Int64)? {
+        guard let header = lines.first(where: { $0.contains("Ibytes") && $0.contains("Obytes") }) else { return nil }
+        let titles = header.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let ibytes = titles.firstIndex(of: "Ibytes"), let obytes = titles.firstIndex(of: "Obytes") else {
+            return nil
+        }
+        let rxFromEnd = titles.count - ibytes
+        let txFromEnd = titles.count - obytes
+        var rx: Int64 = 0
+        var tx: Int64 = 0
+        for line in lines where line.contains("<Link#") {
+            let columns = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard let received = columnFromEnd(columns, fromEnd: rxFromEnd),
+                  let sent = columnFromEnd(columns, fromEnd: txFromEnd) else { continue }
+            rx += received
+            tx += sent
+        }
+        return (rx, tx)
+    }
+
+    private static func columnFromEnd(_ columns: [String], fromEnd: Int) -> Int64? {
+        let index = columns.count - fromEnd
+        guard fromEnd > 0, index >= 0, index < columns.count else { return nil }
+        return Int64(columns[index])
+    }
+
+    /// A `netstat -ib` link row with no header. The counters at the end are
+    /// `Ipkts Ierrs Ibytes Opkts Oerrs Obytes`, then `Coll` and `Drop` when printed.
+    /// Ibytes stays the third of that run and Obytes the sixth.
     private static func netstatLinkCounters(_ line: String) -> (rx: Int64, tx: Int64)? {
         guard line.contains("<Link#") else { return nil }
         var numbers: [Int64] = []
         for token in line.split(whereSeparator: \.isWhitespace).reversed() {
             guard let value = Int64(token) else { break }
             numbers.append(value)
-            if numbers.count == 7 { break }
         }
-        guard numbers.count == 6 || numbers.count == 7 else { return nil }
+        guard numbers.count >= 6, numbers.count <= 8 else { return nil }
         let ordered = Array(numbers.reversed())
         return (ordered[2], ordered[5])
     }
