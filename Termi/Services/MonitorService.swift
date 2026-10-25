@@ -30,6 +30,10 @@ actor MonitorService {
     /// never ran the fallback — `head` exits 0 on empty input — and `top | head` itself makes a
     /// successful `top` exit from SIGPIPE, which would then launch the other `top` as well.
     /// CPU falls back only when the first probe printed nothing.
+    /// Network counters come from `/proc/net/dev` when that file is readable, and from
+    /// `netstat -ib` otherwise (macOS). `head` only bounds a runaway listing: 400 lines still
+    /// include the physical interface. `head -20` ended while the listing was still on loopback
+    /// and virtual interfaces, so the counters that remained were parsed as zero.
     nonisolated static let statsCommand = """
     echo "===HOSTNAME==="; hostname
     echo "===UPTIME==="; uptime
@@ -37,7 +41,7 @@ actor MonitorService {
     echo "===MEM==="; free -b 2>/dev/null || vm_stat
     echo "===DISK==="; df -B1 / 2>/dev/null || df -k /
     echo "===CPU==="; cpu=$(top -bn1 2>/dev/null | head -10); if [ -z "$cpu" ]; then cpu=$(top -l1 2>/dev/null | head -10); fi; printf '%s\\n' "$cpu"
-    echo "===NET==="; if [ -r /proc/net/dev ]; then tail -n +3 /proc/net/dev; else netstat -ib 2>/dev/null | head -20; fi
+    echo "===NET==="; if [ -r /proc/net/dev ]; then tail -n +3 /proc/net/dev; else netstat -ib 2>/dev/null | head -n 400; fi
     """
 
     /// Gather all server stats in one SSH call
@@ -212,16 +216,76 @@ actor MonitorService {
     }
 
     func parseNetwork(_ raw: String, stats: inout ServerStats) {
-        // Linux /proc/net/dev — sum all interfaces
         let lines = raw.components(separatedBy: "\n")
-        for line in lines {
-            let parts = line.components(separatedBy: ":").last?
-                .components(separatedBy: " ").filter { !$0.isEmpty } ?? []
-            if parts.count >= 9 {
-                stats.networkRx += Int64(parts[safe: 0] ?? "") ?? 0
-                stats.networkTx += Int64(parts[safe: 8] ?? "") ?? 0
-            }
+        // `netstat -ib` names its columns. Counting from the left is wrong: the Address column
+        // is missing on link rows that have no MAC, and some releases add a Drop column.
+        if let totals = Self.netstatTotals(lines) {
+            stats.networkRx += totals.rx
+            stats.networkTx += totals.tx
+            return
         }
+        for line in lines {
+            let counters = Self.procNetDevCounters(line) ?? Self.netstatLinkCounters(line)
+            guard let counters else { continue }
+            stats.networkRx += counters.rx
+            stats.networkTx += counters.tx
+        }
+    }
+
+    /// One `/proc/net/dev` row: `eth0: <rx bytes> … <tx bytes>`. The name is the text before the
+    /// first colon, so a `netstat` row whose address contains colons is not read as this format.
+    /// Receive bytes are field 0 after the colon; transmit bytes are field 8.
+    private static func procNetDevCounters(_ line: String) -> (rx: Int64, tx: Int64)? {
+        guard let colon = line.firstIndex(of: ":") else { return nil }
+        let name = line[..<colon].trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, name.allSatisfy({ !$0.isWhitespace }) else { return nil }
+        let fields = line[line.index(after: colon)...].split(whereSeparator: \.isWhitespace).map(String.init)
+        guard fields.count >= 9, let rx = Int64(fields[0]), let tx = Int64(fields[8]) else { return nil }
+        return (rx, tx)
+    }
+
+    /// Sum of `<Link#>` rows. Address rows repeat the same counters, so they are not added.
+    /// Column indexes are distances from the right edge of the header, which stay put when
+    /// Address is omitted. Returns nil when this is not `netstat` output.
+    private static func netstatTotals(_ lines: [String]) -> (rx: Int64, tx: Int64)? {
+        guard let header = lines.first(where: { $0.contains("Ibytes") && $0.contains("Obytes") }) else { return nil }
+        let titles = header.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let ibytes = titles.firstIndex(of: "Ibytes"), let obytes = titles.firstIndex(of: "Obytes") else {
+            return nil
+        }
+        let rxFromEnd = titles.count - ibytes
+        let txFromEnd = titles.count - obytes
+        var rx: Int64 = 0
+        var tx: Int64 = 0
+        for line in lines where line.contains("<Link#") {
+            let columns = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard let received = columnFromEnd(columns, fromEnd: rxFromEnd),
+                  let sent = columnFromEnd(columns, fromEnd: txFromEnd) else { continue }
+            rx += received
+            tx += sent
+        }
+        return (rx, tx)
+    }
+
+    private static func columnFromEnd(_ columns: [String], fromEnd: Int) -> Int64? {
+        let index = columns.count - fromEnd
+        guard fromEnd > 0, index >= 0, index < columns.count else { return nil }
+        return Int64(columns[index])
+    }
+
+    /// A `netstat -ib` link row with no header. The counters at the end are
+    /// `Ipkts Ierrs Ibytes Opkts Oerrs Obytes`, then `Coll` and `Drop` when printed.
+    /// Ibytes stays the third of that run and Obytes the sixth.
+    private static func netstatLinkCounters(_ line: String) -> (rx: Int64, tx: Int64)? {
+        guard line.contains("<Link#") else { return nil }
+        var numbers: [Int64] = []
+        for token in line.split(whereSeparator: \.isWhitespace).reversed() {
+            guard let value = Int64(token) else { break }
+            numbers.append(value)
+        }
+        guard numbers.count >= 6, numbers.count <= 8 else { return nil }
+        let ordered = Array(numbers.reversed())
+        return (ordered[2], ordered[5])
     }
 
     private func executeSSH(host: Host, command: String) async throws -> String {

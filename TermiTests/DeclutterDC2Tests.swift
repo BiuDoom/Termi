@@ -88,8 +88,8 @@ import Foundation
 // MARK: - Local panel
 
 @Test func localAccountIsUserAtTheMacsShortName() {
-    #expect(SFTPViewModel.accountText(user: "termi", hostName: "example-host.local") == "user@example-host")
-    #expect(SFTPViewModel.accountText(user: "termi", hostName: "example-host") == "user@example-host")
+    #expect(SFTPViewModel.accountText(user: "termi", hostName: "example-host.local") == "termi@example-host")
+    #expect(SFTPViewModel.accountText(user: "termi", hostName: "example-host") == "termi@example-host")
     #expect(SFTPViewModel.accountText(user: "termi", hostName: "") == "termi")
 }
 
