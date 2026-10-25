@@ -176,20 +176,48 @@ struct SSHConnectionSpec: Sendable, Equatable {
     /// Non-secret identity of this connection. Two specs with the same fingerprint can share
     /// one master connection; editing a host (address, user, key, jump chain…) changes it.
     var fingerprint: String {
-        var parts = hops.map { hop -> String in
-            let key = hop.credentials.privateKey.map { "k\($0.keyId.map(String.init) ?? $0.name)" } ?? "-"
-            return [hop.hostname, String(hop.port), hop.username, key,
-                    hop.credentials.useSystemAgent ? "a" : "-",
-                    hop.agentForwarding ? "f" : "-", hop.userConfigAlias ?? "-",
-                    hop.userOptions.keys.sorted().map { "\($0)=\(hop.userOptions[$0]!)" }.joined(separator: ";"),
-                    "ia=" + (hop.userAgentOptions.identityAgent ?? "-"),
-                    "if=" + hop.userAgentOptions.identityFiles.joined(separator: ";"),
-                    "cf=" + hop.userAgentOptions.certificateFiles.joined(separator: ";")]
-                .joined(separator: "|")
+        // One expression here is too much for the Swift 6.0 type checker (Xcode 16.2).
+        // The text is the connection identity, so the pieces below stay in this order.
+        var parts: [String] = []
+        parts.reserveCapacity(hops.count + 2)
+        for hop in hops {
+            parts.append(Self.fingerprintComponent(for: hop))
         }
-        parts.append("t\(connectTimeout)/\(keepAliveInterval)/\(keepAliveCountMax)")
+        let timeouts = "t\(connectTimeout)/\(keepAliveInterval)/\(keepAliveCountMax)"
+        parts.append(timeouts)
         parts.append(userConfigPath ?? "-")
         return parts.joined(separator: ">")
+    }
+
+    /// One hop inside `fingerprint`, split out so Swift 6.0 can type-check it.
+    private static func fingerprintComponent(for hop: SSHHop) -> String {
+        let key: String
+        if let privateKey = hop.credentials.privateKey {
+            if let keyId = privateKey.keyId {
+                key = "k\(keyId)"
+            } else {
+                key = "k\(privateKey.name)"
+            }
+        } else {
+            key = "-"
+        }
+        let agent = hop.credentials.useSystemAgent ? "a" : "-"
+        let forwarding = hop.agentForwarding ? "f" : "-"
+        let alias = hop.userConfigAlias ?? "-"
+        let options = hop.userOptions
+        var optionParts: [String] = []
+        for name in options.keys.sorted() {
+            optionParts.append(name + "=" + options[name]!)
+        }
+        let identityAgent = hop.userAgentOptions.identityAgent ?? "-"
+        let identityFiles = hop.userAgentOptions.identityFiles.joined(separator: ";")
+        let certificateFiles = hop.userAgentOptions.certificateFiles.joined(separator: ";")
+        let fields = [
+            hop.hostname, String(hop.port), hop.username, key,
+            agent, forwarding, alias, optionParts.joined(separator: ";"),
+            "ia=" + identityAgent, "if=" + identityFiles, "cf=" + certificateFiles
+        ]
+        return fields.joined(separator: "|")
     }
 
     /// Reject values that could break out of the generated ssh_config or be parsed as options.

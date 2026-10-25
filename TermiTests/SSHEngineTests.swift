@@ -122,6 +122,23 @@ private func hop(_ alias: String, host: String = "10.0.0.1", port: Int = 22, use
     #expect(base.fingerprint == changedPassword.fingerprint)
 }
 
+@Test func specFingerprintKeepsItsFieldOrder() {
+    var hop = hop("termi-h0", host: "example", port: 2222, user: "admin",
+                  credentials: SSHCredentials(
+                    privateKey: SSHCredentials.PrivateKey(keyId: 4, name: "ignored", pem: "PEM", passphrase: "secret"),
+                    useSystemAgent: true))
+    hop.agentForwarding = true
+    hop.userConfigAlias = "prod"
+    hop.userOptions = ["macs": "hmac-sha2-256", "ciphers": "aes128-ctr"]
+    hop.userAgentOptions.identityAgent = "none"
+    hop.userAgentOptions.identityFiles = ["/k1", "/k2"]
+    hop.userAgentOptions.certificateFiles = ["/c1"]
+    let spec = SSHConnectionSpec(hops: [hop], connectTimeout: 9, keepAliveInterval: 8,
+                                 keepAliveCountMax: 7, userConfigPath: "/Users/u/.ssh/config")
+    let expected = "example|2222|admin|k4|a|f|prod|ciphers=aes128-ctr;macs=hmac-sha2-256|ia=none|if=/k1;/k2|cf=/c1>t9/8/7>/Users/u/.ssh/config"
+    #expect(spec.fingerprint == expected)
+}
+
 @Test func failureClassification() {
     let spec = SSHConnectionSpec(hops: [hop("termi-h0")])
     #expect(SSHMasterConnection.classifyFailure(
