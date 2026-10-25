@@ -151,12 +151,12 @@ func sftpNewUploadRespectsTheServerCreationMask(umask: String) async throws {
     DispatchQueue.global().asyncAfter(deadline: .now() + 30) { [weak client] in client?.close() }
     try await client.connect()
     defer { client.close() }
+    // The denial comes when the staged copy is published, after its handle was closed.
+    // The match is outside `#expect`: Swift 6.0 crashes on an enum pattern against `any Error` there.
     await #expect {
         _ = try await client.upload(source, to: "/dest")
     } throws: { error in
-        // The denial comes when the staged copy is published, after its handle was closed.
-        guard case SFTPClient.Failure.status(let code, _) = error else { return false }
-        return code == SFTPClient.Failure.codePermissionDenied
+        isSFTPPermissionDenied(error)
     }
     // This next OPEN reuses the closed numeric handle on OpenSSH. Only its own CLOSE is sent.
     let original = try await client.readFile("/dest")
@@ -1416,6 +1416,12 @@ private func sftpRequestLog(_ log: URL) -> Data {
 private func sftpTransferFailed(_ transfer: TransferItem) -> Bool {
     if case .failed = transfer.state { return true }
     return false
+}
+
+/// A denied SFTP status. Matched here, not inside `#expect` (Swift 6.0).
+private func isSFTPPermissionDenied(_ error: any Error) -> Bool {
+    guard case SFTPClient.Failure.status(let code, _) = error else { return false }
+    return code == SFTPClient.Failure.codePermissionDenied
 }
 
 @Test @MainActor func sftpUploadOfAVolumeIsRefusedBeforeAnythingIsRead() async throws {
