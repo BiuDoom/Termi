@@ -166,14 +166,30 @@ final class SSHRuntime: @unchecked Sendable {
 
     // MARK: - Process helpers
 
-    /// SIGTERM now, SIGKILL if the process is still around after `grace` seconds.
-    /// (A child can inherit a blocked SIGTERM from the thread that spawned it.)
+    /// SIGTERM the process group now, and SIGKILL it if anything is still there after `grace`.
+    ///
+    /// Foundation starts `Process` in its own group. Signalling only the leader leaves a
+    /// ProxyJump `ssh`, a ProxyCommand, or a grandchild running after the leader exits, and a
+    /// child can inherit a blocked SIGTERM from the thread that spawned it. The group's id is
+    /// taken only while this process is still running, so a later `stop` of an exited process
+    /// (a master released long after `ssh` quit) cannot hit a pid that has been reused. A group
+    /// id stays reserved until its last member is gone, so the follow-up SIGKILL reaches this
+    /// group or fails with `ESRCH`. The application's own group is never signalled.
     static func stop(_ process: Process, grace: TimeInterval = 3) {
         let pid = process.processIdentifier
         guard pid > 0, process.isRunning else { return }
-        process.terminate()
+        // `getpgid` fails if the leader exits in this window; members can still be in the group.
+        // The running check above is what keeps a long-dead pid from matching some other group.
+        let ownsGroup = pid != getpgrp() && (getpgid(pid) == pid || kill(-pid, 0) == 0)
+        if ownsGroup {
+            kill(-pid, SIGTERM)
+        } else {
+            process.terminate()
+        }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + grace) {
-            if process.isRunning, kill(pid, 0) == 0 {
+            if ownsGroup {
+                kill(-pid, SIGKILL)
+            } else if process.isRunning, kill(pid, 0) == 0 {
                 kill(pid, SIGKILL)
             }
         }

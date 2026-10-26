@@ -976,6 +976,69 @@ private func savedPasswords(answering answers: [SSHPromptResponse]) async throws
     #expect(!SSHRuntime.isProcessAlive(pid))
 }
 
+/// SIGTERM is ignored by the shell and inherited by the grandchild (`trap '' TERM` survives
+/// exec). Killing only the leader leaves that grandchild running; the group's SIGKILL must
+/// reach it.
+@Test func stoppingAProcessStopsItsWholeGroup() async throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-StopGroup-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let parentFile = folder.appendingPathComponent("parent")
+    let childFile = folder.appendingPathComponent("child")
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = [
+        "-c",
+        "echo $$ > \"$1\"; trap '' TERM; /bin/sleep 60 & echo $! > \"$2\"; wait",
+        "stop-group",
+        parentFile.path,
+        childFile.path
+    ]
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    let leader = process.processIdentifier
+    defer { if leader > 0 { kill(-leader, SIGKILL) } }
+
+    var parent: Int32 = 0
+    var child: Int32 = 0
+    for _ in 0..<150 {
+        let parentText = (try? String(contentsOf: parentFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let childText = (try? String(contentsOf: childFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let parsedParent = Int32(parentText), let parsedChild = Int32(childText),
+           parsedParent > 0, parsedChild > 0 {
+            parent = parsedParent
+            child = parsedChild
+            break
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    #expect(parent > 0)
+    #expect(child > 0)
+    guard parent > 0, child > 0 else { return }
+    let childGroup = getpgid(child)
+    #expect(childGroup == parent)
+
+    SSHRuntime.stop(process, grace: 0.3)
+    var polls = 0
+    var leaderStopped = false
+    var childAlive = true
+    while polls < 60 {
+        leaderStopped = !process.isRunning
+        childAlive = kill(child, 0) == 0
+        if leaderStopped && !childAlive { break }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        polls += 1
+    }
+    #expect(leaderStopped)
+    #expect(!childAlive)
+}
+
 @Test func staleControlSocketCleanupDoesNotWaitOnAHungSSH() throws {
     let parent = FileManager.default.temporaryDirectory
         .appendingPathComponent("Termi-Stale-\(UUID().uuidString)", isDirectory: true)
