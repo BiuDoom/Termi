@@ -161,7 +161,7 @@ actor DatabaseManager {
         guard fd >= 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
-        defer { close(fd) }
+        defer { closeFileDescriptor(fd) }
         guard fchmod(fd, 0o700) == 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
@@ -186,7 +186,7 @@ actor DatabaseManager {
         guard fd >= 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
-        defer { close(fd) }
+        defer { closeFileDescriptor(fd) }
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
@@ -203,6 +203,16 @@ actor DatabaseManager {
         guard actual == expected else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
         }
+    }
+
+    /// `DatabaseManager.close()` shuts the pool. An unqualified `close(fd)` is that method,
+    /// with the descriptor read as the actor, so the C function is named explicitly.
+    private static func closeFileDescriptor(_ fd: Int32) {
+        #if canImport(Darwin)
+        _ = Darwin.close(fd)
+        #else
+        _ = Glibc.close(fd)
+        #endif
     }
 
     /// Open the database file at `url` on its own and check that it is one of this app's and
