@@ -507,6 +507,34 @@ private func insertHost(labelled label: String, into pool: DatabasePool) async t
     }
 }
 
+// VACUUM INTO creates its file 0644 under the usual umask. The staging directory has to be
+// 0700 before that write, or the pages are world-readable until a later chmod.
+@Test func backupStagingDirectoryIsOwnerOnly() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-Tests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+
+    let staging = folder.appendingPathComponent(".backup.db.\(UUID().uuidString)", isDirectory: true)
+    try DatabaseManager.makeOwnerOnlyDirectory(at: staging)
+    #expect(try posixMode(staging.path) == 0o700)
+    let planted = try FileManager.default.contentsOfDirectory(atPath: staging.path)
+    #expect(planted.isEmpty)
+
+    // A symlink already at the path must not be followed into chmod'ing whatever it names.
+    let target = folder.appendingPathComponent("target-dir", isDirectory: true)
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+    let link = folder.appendingPathComponent("link-dir")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+    let followed = Result { try DatabaseManager.makeOwnerOnlyDirectory(at: link) }
+    if case .success = followed {
+        Issue.record("secured a directory through a symlink")
+    }
+    #expect(try posixMode(target.path) == 0o755)
+}
+
 // The pool is in WAL mode: copying the main file alone used to leave out everything that had
 // not been checkpointed yet.
 @Test func backupIsOneCompleteFile() async throws {
@@ -519,12 +547,14 @@ private func insertHost(labelled label: String, into pool: DatabasePool) async t
     #expect(!FileManager.default.fileExists(atPath: backup.path + "-wal"))
     let labels = try hostLabels(inDatabaseAt: backup.path)
     #expect(labels == ["first"])
+    #expect(try posixMode(backup.path) == 0o600)
 
     // Over a file that is already there (the save panel has asked): replaced by the new backup.
     try await insertHost(labelled: "second", into: scratch.pool)
     try await DatabaseManager.backup(scratch.pool, to: backup)
     let labelsAfter = try hostLabels(inDatabaseAt: backup.path)
     #expect(labelsAfter == ["first", "second"])
+    #expect(try posixMode(backup.path) == 0o600)
     let leftovers = try FileManager.default.contentsOfDirectory(atPath: scratch.folder.path)
         .filter { $0.hasPrefix(".backup.db") }
     #expect(leftovers.isEmpty)
