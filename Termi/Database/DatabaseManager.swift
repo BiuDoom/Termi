@@ -112,19 +112,23 @@ actor DatabaseManager {
     /// a parameter so that tests can pass a scratch one.
     static func backup(_ database: any DatabaseWriter, to url: URL) async throws {
         let fm = FileManager.default
-        // VACUUM INTO only writes a new file. Writing next to the destination first also means
-        // that a file already there (the save panel asked) is only replaced by a complete backup.
-        let partial = url.deletingLastPathComponent()
-            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
+        // VACUUM INTO only writes a new file, and it creates that file with the process umask
+        // (usually 0644) before returning. chmod afterwards is already too late. The copy, and
+        // the journal SQLite keeps beside it, are created inside a 0700 directory next to the
+        // destination and the copy is made 0600 before that directory is left. A file already at
+        // the destination (the save panel asked) is replaced only by a complete backup.
+        let staging = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)", isDirectory: true)
+        let partial = staging.appendingPathComponent("backup.db")
         do {
-            let path = partial.path
+            try makeOwnerOnlyDirectory(at: staging)
             try await database.writeWithoutTransaction { db in
-                try db.execute(sql: "VACUUM INTO ?", arguments: [path])
+                try db.execute(sql: "VACUUM INTO ?", arguments: [partial.path])
             }
-            // SQLite creates the copy with the process umask (usually 0644). Tighten it before
-            // anything else opens the file, and again after it takes its final name.
-            _ = chmod(partial.path, 0o600)
+            try secureRegularFile(at: partial, mode: 0o600)
             // A backup that would not restore is reported now, not when it is needed.
+            // Verification can create a wal or journal beside the copy; those stay in the
+            // private directory and are removed with it.
             do {
                 try checkDatabaseFile(at: partial)
             } catch {
@@ -135,12 +139,80 @@ actor DatabaseManager {
             } else {
                 try fm.moveItem(at: partial, to: url)
             }
+            // rename keeps the mode set above. Tighten again in case the replace copied.
             _ = chmod(url.path, 0o600)
         } catch {
-            // Only the unfinished copy written above.
-            try? fm.removeItem(at: partial)
+            try? fm.removeItem(at: staging)
             throw error
         }
+        try? fm.removeItem(at: staging)
+    }
+
+    /// Create `url` as a directory only this user can list or add to.
+    ///
+    /// The mode passed to `mkdir` is masked by umask, so a directory asked for as 0700 is often
+    /// created 0755. `fchmod` on the directory fd sets 0700 before anything is written into it.
+    /// `O_NOFOLLOW` refuses a symlink; anything planted in the brief moment the directory was
+    /// group-writable (umask 002) makes this throw instead of being used.
+    static func makeOwnerOnlyDirectory(at url: URL) throws {
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { closeFileDescriptor(fd) }
+        guard fchmod(fd, 0o700) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        var info = stat()
+        guard fstat(fd, &info) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        let mode = UInt32(info.st_mode) & 0o777
+        guard info.st_mode & S_IFMT == S_IFDIR, mode == 0o700 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+        }
+        let names = try FileManager.default.contentsOfDirectory(atPath: url.path)
+        guard names.isEmpty else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EEXIST))
+        }
+    }
+
+    /// `mode` on the regular file at `url`, from this fd, before the file is renamed anywhere
+    /// other users can open. A symlink is refused rather than followed.
+    private static func secureRegularFile(at url: URL, mode: mode_t) throws {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { closeFileDescriptor(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+        }
+        guard fchmod(fd, mode) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        var secured = stat()
+        guard fstat(fd, &secured) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        let actual = UInt32(secured.st_mode) & 0o777
+        let expected = UInt32(mode) & 0o777
+        guard actual == expected else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+        }
+    }
+
+    /// `DatabaseManager.close()` shuts the pool. An unqualified `close(fd)` is that method,
+    /// with the descriptor read as the actor, so the C function is named explicitly.
+    private static func closeFileDescriptor(_ fd: Int32) {
+        #if canImport(Darwin)
+        _ = Darwin.close(fd)
+        #else
+        _ = Glibc.close(fd)
+        #endif
     }
 
     /// Open the database file at `url` on its own and check that it is one of this app's and
