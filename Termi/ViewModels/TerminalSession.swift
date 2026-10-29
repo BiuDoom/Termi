@@ -108,6 +108,9 @@ final class TerminalSession: Identifiable {
     // Connection log + session transcript
     @ObservationIgnored private var connectionLogId: Int64?
     @ObservationIgnored private var connectedAt: Date?
+    /// Bumped when a shell starts and when that shell's log is closed. The history insert is
+    /// async, so the row can come back after this shell has ended or the next one has started.
+    @ObservationIgnored private var connectionLogGeneration = 0
     @ObservationIgnored private var captureHandle: FileHandle?
     @ObservationIgnored private var captureBytes = 0
     private static let maxCaptureBytes = 50 * 1024 * 1024
@@ -704,13 +707,34 @@ final class TerminalSession: Identifiable {
         SessionTranscripts.url(for: logId).path
     }
 
+    /// Whether the history row opened for `generation` still belongs to the shell that is up.
+    ///
+    /// The insert returns on its own task. By then the shell may have ended (`shellStillOpen`
+    /// is false while the exit is still shown as connected — an exit of 255 waits to see
+    /// whether the master died), or a reconnect may have started the next shell (a new
+    /// generation, with its own start time). Attaching the old row would record this shell's
+    /// output under the previous session, and the row for this shell would stay "connected".
+    nonisolated static func keepsConnectionLog(
+        generation: Int, activeGeneration: Int, isConnected: Bool, shellStillOpen: Bool
+    ) -> Bool {
+        isConnected && shellStillOpen && generation == activeGeneration
+    }
+
     private func startConnectionLog(host: Host) {
         connectedAt = Date()
+        connectionLogGeneration += 1
+        let generation = connectionLogGeneration
         Task { [weak self] in
-            guard let entry = try? await ConnectionLogRepository.shared.log(host: host, status: "connected"),
-                  let logId = entry.id, let self else { return }
-            guard self.state == .connected, self.connectedAt != nil else {
-                // Already disconnected while the log entry was being written.
+            let entry = try? await ConnectionLogRepository.shared.log(host: host, status: "connected")
+            guard let logId = entry?.id else { return }
+            guard let self, Self.keepsConnectionLog(
+                generation: generation,
+                activeGeneration: self.connectionLogGeneration,
+                isConnected: self.state == .connected,
+                shellStillOpen: self.connectedAt != nil
+            ) else {
+                // This shell is gone, or a later one has started. Close the row; it is not this
+                // session's transcript. The pane may already have been released.
                 try? await ConnectionLogRepository.shared.updateDisconnected(id: logId, durationMs: 0)
                 return
             }
@@ -722,6 +746,9 @@ final class TerminalSession: Identifiable {
     private func finishConnectionLog() {
         guard let start = connectedAt else { return }
         connectedAt = nil
+        // Drop an insert that has not come back yet, including while the state is still
+        // `.connected` (the exit-255 check has not decided).
+        connectionLogGeneration += 1
         if let logId = connectionLogId {
             let duration = Int(Date().timeIntervalSince(start) * 1000)
             let generation = dataGeneration
@@ -735,17 +762,15 @@ final class TerminalSession: Identifiable {
     }
 
     private func startCapture(logId: Int64) {
+        // A handle left open by an earlier shell must not stay open under the new file.
+        stopCapture()
         let directory = Self.sessionLogsDirectory
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("\(logId).log")
-        captureBytes = 0
         // Record ids are kept above every transcript on disk, so nothing should be here. If
         // something is, it is another session's output: this session goes unrecorded rather
         // than writing over it.
-        guard !FileManager.default.fileExists(atPath: url.path) else {
-            captureHandle = nil
-            return
-        }
+        guard !FileManager.default.fileExists(atPath: url.path) else { return }
         FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
         captureHandle = try? FileHandle(forWritingTo: url)
     }
