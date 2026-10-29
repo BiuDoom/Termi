@@ -1,5 +1,10 @@
 import Foundation
 import CoreServices
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// SFTP protocol version 3 client (the version OpenSSH's sftp-server speaks), running over the
 /// stdin/stdout of `ssh -s <host> sftp` — i.e. a multiplexed session on the master connection.
@@ -262,6 +267,11 @@ final class SFTPClient: @unchecked Sendable {
     private let errors: Pipe
     private let lock = NSLock()
     private let writeLock = NSLock()
+    /// Write end of `input`, captured while it is open. `FileHandle.write(contentsOf:)` raises
+    /// `NSFileHandleOperationException` — not a Swift error — when this end is closed on another
+    /// thread (an upload's progress callback calls `close()` with writes still in flight).
+    private let inputWriteFD: Int32
+    private var inputWriteClosed = false
     private var nextRequestId: UInt32 = 1
     private var pending: [UInt32: CheckedContinuation<Response, Error>] = [:]
     private var versionContinuation: CheckedContinuation<Void, Error>?
@@ -280,6 +290,7 @@ final class SFTPClient: @unchecked Sendable {
         process.standardInput = input
         process.standardOutput = output
         process.standardError = errors
+        inputWriteFD = input.fileHandleForWriting.fileDescriptor
     }
 
     convenience init(command: SSHMasterConnection.Command) {
@@ -331,7 +342,13 @@ final class SFTPClient: @unchecked Sendable {
             closedError = .connectionClosed("")
             return false
         }
-        try? input.fileHandleForWriting.close()
+        // Same lock as the packet write. Closing the handle on another thread used to raise
+        // NSFileHandleOperationException out of FileHandle.write and kill the process.
+        writeLock.withLock {
+            guard !inputWriteClosed else { return }
+            inputWriteClosed = true
+            try? input.fileHandleForWriting.close()
+        }
         if !alreadyClosed {
             failAll(with: .connectionClosed(""))
         }
@@ -429,16 +446,61 @@ final class SFTPClient: @unchecked Sendable {
         let length = UInt32(payload.count).bigEndian
         withUnsafeBytes(of: length) { frame.append(contentsOf: $0) }
         frame.append(payload)
-        do {
-            try writeLock.withLock {
-                try input.fileHandleForWriting.write(contentsOf: frame)
-            }
-            return nil
-        } catch {
-            let failure = Failure.connectionClosed(error.localizedDescription)
+        let code: Int32 = writeLock.withLock {
+            if inputWriteClosed { return EPIPE }
+            return Self.writeAll(inputWriteFD, frame)
+        }
+        guard code == 0 else {
+            let failure = Failure.connectionClosed(String(cString: strerror(code)))
             failAll(with: failure)
             return failure
         }
+        return nil
+    }
+
+    /// Blocking write. `EINTR` is retried. A closed read end is `EPIPE` (SIGPIPE is held for
+    /// this call only, so it does not kill the process) and a closed write end is `EBADF`.
+    private static func writeAll(_ fd: Int32, _ data: Data) -> Int32 {
+        let flags = fcntl(fd, F_GETFL)
+        if flags >= 0, (flags & O_NONBLOCK) != 0 {
+            _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK)
+        }
+        var blocked = sigset_t()
+        sigemptyset(&blocked)
+        sigaddset(&blocked, SIGPIPE)
+        var previous = sigset_t()
+        pthread_sigmask(SIG_BLOCK, &blocked, &previous)
+        let failed: Int32 = data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress, raw.count > 0 else { return 0 }
+            var offset = 0
+            while offset < raw.count {
+                let n = systemWrite(fd, base.advanced(by: offset), raw.count - offset)
+                if n > 0 {
+                    offset += n
+                    continue
+                }
+                let code = errno
+                if code == EINTR { continue }
+                return code == 0 ? EIO : code
+            }
+            return 0
+        }
+        var pending = sigset_t()
+        sigpending(&pending)
+        if sigismember(&pending, SIGPIPE) == 1 {
+            var caught: Int32 = 0
+            sigwait(&blocked, &caught)
+        }
+        pthread_sigmask(SIG_SETMASK, &previous, nil)
+        return failed
+    }
+
+    private static func systemWrite(_ fd: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int {
+        #if canImport(Glibc)
+        Glibc.write(fd, buffer, count)
+        #else
+        Darwin.write(fd, buffer, count)
+        #endif
     }
 
     private func handle(_ packet: Data) {
