@@ -30,6 +30,28 @@ import AppKit
     #expect(TerminalSession.exitCode(fromWaitStatus: segfaultWithCore) == 139)
 }
 
+// MARK: - History row vs the shell that opened it
+
+@Test func aConnectionLogStaysWithTheShellThatOpenedIt() {
+    let sameShell = TerminalSession.keepsConnectionLog(
+        generation: 4, activeGeneration: 4, isConnected: true, shellStillOpen: true)
+    #expect(sameShell)
+
+    // Reconnect started the next shell before the previous insert returned.
+    let reconnected = TerminalSession.keepsConnectionLog(
+        generation: 4, activeGeneration: 6, isConnected: true, shellStillOpen: true)
+    #expect(reconnected == false)
+
+    // The shell ended, but the exit-255 check has not changed the state off `.connected` yet.
+    let endedWhileStillShownConnected = TerminalSession.keepsConnectionLog(
+        generation: 4, activeGeneration: 4, isConnected: true, shellStillOpen: false)
+    #expect(endedWhileStillShownConnected == false)
+
+    let notConnected = TerminalSession.keepsConnectionLog(
+        generation: 4, activeGeneration: 4, isConnected: false, shellStillOpen: true)
+    #expect(notConnected == false)
+}
+
 // MARK: - Exit status 255: the remote shell's own, or a lost connection
 
 @Test func exit255OverALiveMasterIsNotAConnectionLossByItself() {
