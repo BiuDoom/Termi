@@ -764,14 +764,10 @@ final class TerminalSession: Identifiable {
     private func startCapture(logId: Int64) {
         // A handle left open by an earlier shell must not stay open under the new file.
         stopCapture()
-        let directory = Self.sessionLogsDirectory
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent("\(logId).log")
         // Record ids are kept above every transcript on disk, so nothing should be here. If
-        // something is, it is another session's output: this session goes unrecorded rather
-        // than writing over it.
-        guard !FileManager.default.fileExists(atPath: url.path) else { return }
-        FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        // something is — including a symlink — this session goes unrecorded rather than
+        // writing over it. The file is 0600 before any byte of the session is written.
+        guard let url = try? SessionTranscripts.createExclusive(for: logId) else { return }
         captureHandle = try? FileHandle(forWritingTo: url)
     }
 
