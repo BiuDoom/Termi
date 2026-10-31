@@ -733,3 +733,67 @@ private actor HistAsked {
     private(set) var texts: [String] = []
     func add(_ text: String) { texts.append(text) }
 }
+
+// MARK: - A transcript file is private from the moment it exists, and never replaces another
+
+private func histMode(_ path: String) throws -> Int {
+    let attributes = try FileManager.default.attributesOfItem(atPath: path)
+    let raw: Int
+    if let number = attributes[.posixPermissions] as? NSNumber {
+        raw = number.intValue
+    } else if let mode = attributes[.posixPermissions] as? Int {
+        raw = mode
+    } else {
+        throw CocoaError(.fileReadUnknown)
+    }
+    return raw & 0o777
+}
+
+@Test func sessionTranscriptIsCreatedOwnerOnlyAndDoesNotReplace() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-Tests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let logs = folder.appendingPathComponent("SessionLogs", isDirectory: true)
+    try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+    // What `mkdir` leaves behind under a typical umask, before any chmod.
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: logs.path)
+
+    let created = try SessionTranscripts.createExclusive(for: 4, in: logs)
+    let url = try #require(created)
+    let directoryMode = try histMode(logs.path)
+    let fileMode = try histMode(url.path)
+    #expect(directoryMode == 0o700)
+    #expect(fileMode == 0o600)
+    let bytes = try Data(contentsOf: url)
+    #expect(bytes.isEmpty)
+
+    // A file already there is another session's output. It is not truncated.
+    let kept = SessionTranscripts.url(for: 9, in: logs)
+    try Data("kept".utf8).write(to: kept)
+    let replaced = try SessionTranscripts.createExclusive(for: 9, in: logs)
+    #expect(replaced == nil)
+    let keptText = try String(contentsOf: kept, encoding: .utf8)
+    #expect(keptText == "kept")
+
+    // A symlink where the transcript would be is not followed, and not written through.
+    let outside = folder.appendingPathComponent("outside.txt")
+    try Data("outside".utf8).write(to: outside)
+    let link = logs.appendingPathComponent("8.log")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+    let throughLink = try? SessionTranscripts.createExclusive(for: 8, in: logs)
+    #expect(throughLink == nil)
+    let outsideText = try String(contentsOf: outside, encoding: .utf8)
+    #expect(outsideText == "outside")
+
+    // A symlink in place of the directory is not chmod'd, and gets no transcript.
+    let real = folder.appendingPathComponent("real-logs", isDirectory: true)
+    try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: real.path)
+    let linkDir = folder.appendingPathComponent("link-logs")
+    try FileManager.default.createSymbolicLink(at: linkDir, withDestinationURL: real)
+    let throughDirectory = try? SessionTranscripts.createExclusive(for: 1, in: linkDir)
+    #expect(throughDirectory == nil)
+    let realMode = try histMode(real.path)
+    #expect(realMode == 0o755)
+    #expect(!FileManager.default.fileExists(atPath: real.appendingPathComponent("1.log").path))
+}
