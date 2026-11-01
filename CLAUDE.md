@@ -1,7 +1,7 @@
 # Termi — macOS SSH Client
 
 > 项目知识库，为 Claude Code 和其他 AI Agent 提供上下文。同步至 Obsidian vault。
-> **最后更新**: 2026-10-19
+> **最后更新**: 2026-11-01
 
 ---
 
@@ -404,6 +404,9 @@ Termi/
 ---
 
 ## 更新日志
+
+### 2026-11-01
+- **停止 SSH 进程时不再误杀复用了进程组号的进程**：`SSHRuntime.stop` 在 SIGTERM 之后隔几秒无条件 `kill(-pid, SIGKILL)`。进程组号在最后一个成员退出后就可以被系统拿去用，延迟的 SIGKILL 会打到新的进程组。现在发 SIGKILL 之前重新判断：只有这个 `Process` 仍在运行并且还是组长，或者组长已经没了而组里还有我们拉起的成员，才向该组发信号。`ProcessRunner` 取消进程时走同一条路径。
 
 ### 2026-10-10
 - **外部模型审查（Codex CLI，gpt-6-astra / ultra，只读）`823fb8e..HEAD`**：5 条发现全部属实并已修——① 历史记录的 id 不得复用磁盘上已有转录的编号：恢复旧备份后数据库的自增计数会落在留作回滚的转录后面，新记录（新会话或导入）会拿到别的会话的转录编号，显示错输出、删除时还会把它删掉；现在新建记录和导入前都把计数抬到磁盘上最大转录编号之上（`SessionTranscripts.highestId` + `ConnectionLogRepository.reserveIds`），会话开始录制时遇到已存在的文件也不覆盖；② 一个单测在固定路径 `/opt/termi-qa/SessionLogs` 上做删除，改为只在自己的临时目录里；③ `test-env.sh up` 两个同时跑时，输的一方回滚会按名字删掉赢的一方的容器，改为 `docker create` 拿到 id 后只回收自己建的；④ `-debugSeedHosts` 重灌时不清 `identityId`；⑤ 主机详情面板打开时延迟 350ms 的滚动没有核对是否还是同一台主机。单测 538 → 541

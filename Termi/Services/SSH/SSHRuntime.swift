@@ -166,33 +166,67 @@ final class SSHRuntime: @unchecked Sendable {
 
     // MARK: - Process helpers
 
+    /// What a signal for a pid is still known to hit.
+    enum StopScope: Equatable {
+        /// The process leads its own group, or that leader has exited while other members
+        /// still hold the group id.
+        case processGroup
+        /// This pid only. It is not the leader of a group this call may signal.
+        case process
+    }
+
     /// SIGTERM the process group now, and SIGKILL it if anything is still there after `grace`.
     ///
     /// Foundation starts `Process` in its own group. Signalling only the leader leaves a
     /// ProxyJump `ssh`, a ProxyCommand, or a grandchild running after the leader exits, and a
-    /// child can inherit a blocked SIGTERM from the thread that spawned it. The group's id is
-    /// taken only while this process is still running, so a later `stop` of an exited process
-    /// (a master released long after `ssh` quit) cannot hit a pid that has been reused. A group
-    /// id stays reserved until its last member is gone, so the follow-up SIGKILL reaches this
-    /// group or fails with `ESRCH`. The application's own group is never signalled.
+    /// child can inherit a blocked SIGTERM from the thread that spawned it.
+    ///
+    /// The scope is decided again before the SIGKILL. A process-group id can be reused as soon
+    /// as its last member has exited, so the decision from the SIGTERM is not safe to replay
+    /// a few seconds later: `kill(-pid, SIGKILL)` would then reach whatever new group had taken
+    /// the id. A live pid is ours only while this `Process` is still running and leads the
+    /// group. If that pid is already gone and the group still exists, the remaining members are
+    /// the ones we spawned — the id stays reserved until they exit. The application's own group
+    /// is never signalled, and neither is pid 1 (`kill(-1, …)` would signal every process).
     static func stop(_ process: Process, grace: TimeInterval = 3) {
         let pid = process.processIdentifier
-        guard pid > 0, process.isRunning else { return }
-        // `getpgid` fails if the leader exits in this window; members can still be in the group.
-        // The running check above is what keeps a long-dead pid from matching some other group.
-        let ownsGroup = pid != getpgrp() && (getpgid(pid) == pid || kill(-pid, 0) == 0)
-        if ownsGroup {
+        switch stopScope(of: pid, leaderStillRunning: process.isRunning) {
+        case .processGroup:
             kill(-pid, SIGTERM)
-        } else {
+        case .process:
             process.terminate()
+        case nil:
+            return
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + grace) {
-            if ownsGroup {
+            switch stopScope(of: pid, leaderStillRunning: process.isRunning) {
+            case .processGroup:
                 kill(-pid, SIGKILL)
-            } else if process.isRunning, kill(pid, 0) == 0 {
+            case .process:
                 kill(pid, SIGKILL)
+            case nil:
+                break
             }
         }
+    }
+
+    /// Where a signal for `pid` still cannot be a recycled process-group id.
+    /// `leaderStillRunning` is `isRunning` of the `Process` this app spawned.
+    static func stopScope(of pid: Int32, leaderStillRunning: Bool) -> StopScope? {
+        guard pid > 1, pid != getpgrp() else { return nil }
+        if leaderStillRunning, getpgid(pid) == pid {
+            return .processGroup
+        }
+        // The leader's pid is free only after the whole group is gone. Re-check it after
+        // the group probe: a pid reused in between belongs to a new leader and must not
+        // be signalled.
+        if !isProcessAlive(pid), kill(-pid, 0) == 0, !isProcessAlive(pid) {
+            return .processGroup
+        }
+        if leaderStillRunning, isProcessAlive(pid) {
+            return .process
+        }
+        return nil
     }
 
     // MARK: - Leftovers from previous runs

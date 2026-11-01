@@ -1039,6 +1039,108 @@ private func savedPasswords(answering answers: [SSHPromptResponse]) async throws
     #expect(!childAlive)
 }
 
+/// A live pid whose `Process` has already exited is someone else's process group.
+/// `kill(-pid, 0) == 0` used to treat that group as ours, and the follow-up SIGKILL
+/// reused the decision made at SIGTERM time — after the group had gone and the id
+/// had been recycled.
+@Test func stopScopeDoesNotClaimAReusedProcessGroup() throws {
+    let callerGroup = getpgrp()
+    #expect(SSHRuntime.stopScope(of: callerGroup, leaderStillRunning: true) == nil)
+    #expect(SSHRuntime.stopScope(of: 0, leaderStillRunning: true) == nil)
+    #expect(SSHRuntime.stopScope(of: 1, leaderStillRunning: true) == nil)
+
+    let sleeper = Process()
+    sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    sleeper.arguments = ["30"]
+    sleeper.standardInput = FileHandle.nullDevice
+    sleeper.standardOutput = FileHandle.nullDevice
+    sleeper.standardError = FileHandle.nullDevice
+    try sleeper.run()
+    let pid = sleeper.processIdentifier
+    defer { if pid > 1 { kill(pid, SIGKILL) } }
+
+    let whileRunning = SSHRuntime.stopScope(of: pid, leaderStillRunning: true)
+    #expect(isProcessGroupScope(whileRunning))
+    let treatedAsReused = SSHRuntime.stopScope(of: pid, leaderStillRunning: false)
+    #expect(treatedAsReused == nil)
+
+    kill(pid, SIGKILL)
+    // Dead, a zombie, or already reused: none of those is a group this Process still owns.
+    let afterSignal = SSHRuntime.stopScope(of: pid, leaderStillRunning: false)
+    #expect(afterSignal == nil)
+}
+
+/// The leader has exited and its child ignores SIGTERM. Stopping must still reach the
+/// child through the group, which stays reserved only while that child is in it.
+@Test func stoppingAfterTheLeaderExitedStopsTheRemainingGroup() async throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-OrphanGroup-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let parentFile = folder.appendingPathComponent("parent")
+    let childFile = folder.appendingPathComponent("child")
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = [
+        "-c",
+        "echo $$ > \"$1\"; /bin/sh -c 'trap \"\" TERM; echo $$ > \"$1\"; exec /bin/sleep 60' termi-child \"$2\" & exit 0",
+        "orphan-group",
+        parentFile.path,
+        childFile.path
+    ]
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    let leader = process.processIdentifier
+    defer { if leader > 1 { kill(-leader, SIGKILL) } }
+
+    var parent: Int32 = 0
+    var child: Int32 = 0
+    for _ in 0..<150 {
+        if let parsedParent = recordedProcessIdentifier(parentFile),
+           let parsedChild = recordedProcessIdentifier(childFile),
+           getpgid(parsedChild) == parsedParent {
+            parent = parsedParent
+            child = parsedChild
+            break
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    #expect(parent > 1)
+    #expect(child > 1)
+    guard parent > 1, child > 1 else { return }
+    #expect(getpgid(child) == parent)
+    #expect(SSHRuntime.isProcessAlive(child))
+    // Same input `stop` uses. A reaped leader (isRunning false, pid gone) still owns the
+    // group while this child is in it. A leader Foundation has not reaped yet is still
+    // that group's leader, so the running check owns it too.
+    let scope = SSHRuntime.stopScope(of: parent, leaderStillRunning: process.isRunning)
+    #expect(isProcessGroupScope(scope))
+
+    SSHRuntime.stop(process, grace: 0.3)
+    var polls = 0
+    var childAlive = true
+    while polls < 60 {
+        childAlive = kill(child, 0) == 0
+        if !childAlive { break }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        polls += 1
+    }
+    #expect(!childAlive)
+}
+
+private func isProcessGroupScope(_ scope: SSHRuntime.StopScope?) -> Bool {
+    scope == .processGroup
+}
+
+private func recordedProcessIdentifier(_ url: URL) -> Int32? {
+    let text = (try? String(contentsOf: url, encoding: .utf8))?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return Int32(text)
+}
+
 @Test func staleControlSocketCleanupDoesNotWaitOnAHungSSH() throws {
     let parent = FileManager.default.temporaryDirectory
         .appendingPathComponent("Termi-Stale-\(UUID().uuidString)", isDirectory: true)

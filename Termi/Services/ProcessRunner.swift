@@ -124,18 +124,10 @@ enum ProcessRunner {
         func finished() { lock.withLock { process = nil } }
 
         private static func stop(_ process: Process) {
-            let pid = process.processIdentifier
-            guard pid > 0 else { return }
-            // Foundation launches Process in its own process group. Check ownership anyway:
-            // never signal the application's group. A shell may have exited while its child
-            // keeps stdout open, so check the group even if its leader no longer exists.
-            let ownsGroup = pid != getpgrp() && (getpgid(pid) == pid || kill(-pid, 0) == 0)
-            if ownsGroup { kill(-pid, SIGTERM) }
-            else if process.isRunning { process.terminate() }
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.2) {
-                if ownsGroup { kill(-pid, SIGKILL) }
-                else if process.isRunning { kill(pid, SIGKILL) }
-            }
+            // A shell may have exited while its child keeps stdout open. `SSHRuntime.stop`
+            // still signals that group, and it decides again before SIGKILL so a recycled
+            // group id is not killed. 0.2s: the caller is blocked until those pipes close.
+            SSHRuntime.stop(process, grace: 0.2)
         }
     }
 }
