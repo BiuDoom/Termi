@@ -126,8 +126,17 @@ final class MonitorViewModel {
         var txRate = 0.0
         if let previous = stats, let previousDate = statsDate {
             let seconds = date.timeIntervalSince(previousDate)
-            rxRate = Self.rate(previous: previous.networkRx, current: fetched.networkRx, seconds: seconds)
-            txRate = Self.rate(previous: previous.networkTx, current: fetched.networkTx, seconds: seconds)
+            // Named counters: a utun that vanished, or one counter that wrapped, used to pull
+            // the summed total backwards and the whole rate became 0.
+            if !previous.networkInterfaces.isEmpty, !fetched.networkInterfaces.isEmpty {
+                let rates = Self.interfaceRates(previous: previous.networkInterfaces,
+                                                current: fetched.networkInterfaces, seconds: seconds)
+                rxRate = rates.rx
+                txRate = rates.tx
+            } else {
+                rxRate = Self.rate(previous: previous.networkRx, current: fetched.networkRx, seconds: seconds)
+                txRate = Self.rate(previous: previous.networkTx, current: fetched.networkTx, seconds: seconds)
+            }
         }
         // After a pause (the page was left, auto refresh was off) the old samples are not the
         // "last five minutes" any more: the trend starts again.
@@ -148,6 +157,36 @@ final class MonitorViewModel {
     nonisolated static func rate(previous: Int64, current: Int64, seconds: TimeInterval) -> Double {
         guard seconds > 0, current >= previous else { return 0 }
         return Double(current - previous) / seconds
+    }
+
+    /// Bytes per second across interfaces that were present both times and did not go backwards.
+    /// An interface that showed up in between contributes nothing: its counter is the total
+    /// since it was created, not traffic during this interval.
+    nonisolated static func interfaceRates(
+        previous: [String: MonitorService.ServerStats.InterfaceCounters],
+        current: [String: MonitorService.ServerStats.InterfaceCounters],
+        seconds: TimeInterval
+    ) -> (rx: Double, tx: Double) {
+        guard seconds > 0 else { return (0, 0) }
+        var rx: Int64 = 0
+        var tx: Int64 = 0
+        for (name, now) in current {
+            guard let before = previous[name] else { continue }
+            rx = adding(rx, rateDelta(before.rx, now.rx))
+            tx = adding(tx, rateDelta(before.tx, now.tx))
+        }
+        return (Double(rx) / seconds, Double(tx) / seconds)
+    }
+
+    private nonisolated static func rateDelta(_ previous: Int64, _ current: Int64) -> Int64 {
+        guard current >= previous else { return 0 }
+        return current - previous
+    }
+
+    private nonisolated static func adding(_ total: Int64, _ delta: Int64) -> Int64 {
+        guard delta > 0 else { return total }
+        if total > Int64.max - delta { return Int64.max }
+        return total + delta
     }
 
     nonisolated static func clampedPercent(_ value: Double) -> Double {
