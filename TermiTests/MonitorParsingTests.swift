@@ -97,6 +97,12 @@ import Foundation
 
     #expect(stats.networkRx == 1_500_000) // 1000000 + 500000
     #expect(stats.networkTx == 2_500_000) // 2000000 + 500000
+    let eth0 = stats.networkInterfaces["eth0"]
+    let loopback = stats.networkInterfaces["lo"]
+    let eth0Expected: MonitorService.ServerStats.InterfaceCounters? = .init(rx: 1_000_000, tx: 2_000_000)
+    let loopbackExpected: MonitorService.ServerStats.InterfaceCounters? = .init(rx: 500_000, tx: 500_000)
+    #expect(eth0 == eth0Expected)
+    #expect(loopback == loopbackExpected)
 }
 
 @Test func parseNetworkEmpty() async {
@@ -195,6 +201,17 @@ import Foundation
     let tx: Int64 = 169_411_755 + 10_090_152
     #expect(stats.networkRx == rx)
     #expect(stats.networkTx == tx)
+    // The down-interface mark is not part of the name, and the address row is not a second copy.
+    let loopback = stats.networkInterfaces["lo0"]
+    let ethernet = stats.networkInterfaces["en0"]
+    let tunnel = stats.networkInterfaces["gif0"]
+    let loopbackExpected: MonitorService.ServerStats.InterfaceCounters? = .init(rx: 169_411_755, tx: 169_411_755)
+    let ethernetExpected: MonitorService.ServerStats.InterfaceCounters? = .init(rx: 86_175_096, tx: 10_090_152)
+    let tunnelExpected: MonitorService.ServerStats.InterfaceCounters? = .init(rx: 0, tx: 0)
+    #expect(loopback == loopbackExpected)
+    #expect(ethernet == ethernetExpected)
+    #expect(tunnel == tunnelExpected)
+    #expect(stats.networkInterfaces.count == 3)
 }
 
 @Test func parseNetworkFromMacOSNetstatWithoutDropColumn() async {

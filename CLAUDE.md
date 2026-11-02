@@ -1,7 +1,7 @@
 # Termi — macOS SSH Client
 
 > 项目知识库，为 Claude Code 和其他 AI Agent 提供上下文。同步至 Obsidian vault。
-> **最后更新**: 2026-11-01
+> **最后更新**: 2026-11-02
 
 ---
 
@@ -189,6 +189,7 @@ Termi/
 
 | Hash | 信息 | 日期 |
 |------|------|------|
+| `96a85c8` | fix: keep network rates when one interface counter drops | 2026-11-02 |
 | `dd88a96` | fix: don't SIGKILL a process group after its id can be reused | 2026-11-01 |
 | `3f44d1f` | fix: the twelve findings of the 2026-10-11 review — atomic SFTP replacement, generation-guarded vault writes, and saved passwords bound to the login they were typed for | 2026-10-19 |
 | `02c05b0` | wip: Codex fixes for F1–F12 exactly as left on 2026-10-11 (snapshot, not verified) | 2026-10-18 |
@@ -405,6 +406,9 @@ Termi/
 ---
 
 ## 更新日志
+
+### 2026-11-02
+- **监控的网络速率不再因为一块网卡消失或计数回绕就变成 0**：接收/发送字节仍是各网卡计数之和，但速率按网卡各自的增量相加。隧道接口关掉、桥接接口带着历史总量出现、或单块网卡的计数往回走时，其余网卡这段时间里的流量还在。磁盘格式没有改。
 
 ### 2026-11-01
 - **停止 SSH 进程时不再误杀复用了进程组号的进程**：`SSHRuntime.stop` 在 SIGTERM 之后隔几秒无条件 `kill(-pid, SIGKILL)`。进程组号在最后一个成员退出后就可以被系统拿去用，延迟的 SIGKILL 会打到新的进程组。现在发 SIGKILL 之前重新判断：只有这个 `Process` 仍在运行并且还是组长，或者组长已经没了而组里还有我们拉起的成员，才向该组发信号。`ProcessRunner` 取消进程时走同一条路径。

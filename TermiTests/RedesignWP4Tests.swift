@@ -48,6 +48,52 @@ private func savedHost(id: Int64) -> Termi.Host {
     #expect(viewModel.stats?.networkRx == 20_000)
 }
 
+@Test @MainActor func networkRateKeepsTheInterfacesThatAreStillThere() {
+    let viewModel = MonitorViewModel()
+    let start = Date(timeIntervalSince1970: 1_000_000)
+    // utun0 is a tunnel that went away. Its bytes leaving the sum used to make the whole
+    // rate 0, including en0's traffic. bridge0 appeared already carrying a lifetime total.
+    var first = reading()
+    first.networkInterfaces = [
+        "en0": .init(rx: 1_000, tx: 500),
+        "utun0": .init(rx: 9_000, tx: 8_000),
+    ]
+    var second = reading()
+    second.networkInterfaces = [
+        "en0": .init(rx: 6_000, tx: 2_500),
+        "bridge0": .init(rx: 100_000, tx: 100_000),
+    ]
+    viewModel.record(first, at: start)
+    viewModel.record(second, at: start.addingTimeInterval(5))
+
+    let rxRate = viewModel.history[1].rxRate
+    let txRate = viewModel.history[1].txRate
+    #expect(rxRate == 1_000)
+    #expect(txRate == 400)
+}
+
+@Test @MainActor func networkRateSkipsOnlyTheCounterThatWrapped() {
+    let viewModel = MonitorViewModel()
+    let start = Date(timeIntervalSince1970: 1_000_000)
+    var first = reading()
+    first.networkInterfaces = [
+        "en0": .init(rx: 1_000, tx: 100),
+        "utun0": .init(rx: 9_000, tx: 9_000),
+    ]
+    var second = reading()
+    second.networkInterfaces = [
+        "en0": .init(rx: 3_500, tx: 100),
+        "utun0": .init(rx: 50, tx: 9_000),
+    ]
+    viewModel.record(first, at: start)
+    viewModel.record(second, at: start.addingTimeInterval(5))
+
+    let rxRate = viewModel.history[1].rxRate
+    let txRate = viewModel.history[1].txRate
+    #expect(rxRate == 500)
+    #expect(txRate == 0)
+}
+
 @Test @MainActor func theTrendKeepsFiveMinutesAndStartsAgainAfterAPause() {
     let viewModel = MonitorViewModel()
     let start = Date(timeIntervalSince1970: 1_000_000)
