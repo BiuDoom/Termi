@@ -1337,8 +1337,8 @@ final class SFTPClient: @unchecked Sendable {
         // umask mode, and the download still proceeds. On a normal volume the mode is set
         // before any byte is written, so umask cannot widen it.
         _ = fchmod(fd, mode)
-        var info = stat()
-        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+        // `stat` / `fstat` are file-scope helpers: this type already has a remote `stat`.
+        guard let info = fileStatus(ofFileDescriptor: fd), info.st_mode & S_IFMT == S_IFREG else {
             closeFileDescriptor(fd)
             unlink(url.path)
             throw POSIXError(.EPERM)
@@ -1353,8 +1353,8 @@ final class SFTPClient: @unchecked Sendable {
     /// True when `url` is still the regular file `identity` names. `lstat` does not follow a
     /// symlink put at that path.
     static func localFile(at url: URL, matches identity: LocalFileIdentity) -> Bool {
-        var info = stat()
-        guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return false }
+        // `lstat` is file-scope: this type already has a remote `lstat`.
+        guard let info = fileStatus(atPath: url.path), info.st_mode & S_IFMT == S_IFREG else { return false }
         return UInt64(info.st_dev) == identity.device && UInt64(info.st_ino) == identity.inode
     }
 }
@@ -1374,6 +1374,21 @@ private func closeFileDescriptor(_ fd: Int32) {
     #else
     _ = Glibc.close(fd)
     #endif
+}
+
+/// `fstat(2)` of an open descriptor. At file scope: inside `SFTPClient`, `stat` is the remote call.
+private func fileStatus(ofFileDescriptor fd: Int32) -> stat? {
+    var info = stat()
+    guard fstat(fd, &info) == 0 else { return nil }
+    return info
+}
+
+/// `lstat(2)`. At file scope: inside `SFTPClient`, `lstat` is the remote call, and it follows
+/// nothing — a symlink is not reported as the file it names.
+private func fileStatus(atPath path: String) -> stat? {
+    var info = stat()
+    guard lstat(path, &info) == 0 else { return nil }
+    return info
 }
 
 /// rename(2): atomically puts `source` in place of `destination`; it fails rather than replace a
