@@ -161,6 +161,8 @@ final class SFTPClient: @unchecked Sendable {
         case atomicReplacementBlocked(path: String, reason: AtomicBlockReason)
         /// Something else took the place of the staged copy before it was published.
         case stagingFileReplaced(String)
+        /// Something else took the place of the local temporary file before it was published.
+        case downloadFileReplaced(String)
 
         static let codeEOF: UInt32 = 1
         static let codeNoSuchFile: UInt32 = 2
@@ -196,6 +198,8 @@ final class SFTPClient: @unchecked Sendable {
                 return String(localized: "“\(path)” cannot be replaced safely: \(reason.explanation). Nothing was changed.")
             case .stagingFileReplaced(let path):
                 return String(localized: "The temporary copy of “\(path)” was replaced on the server while it was uploaded. Nothing was replaced.")
+            case .downloadFileReplaced(let path):
+                return String(localized: "The temporary copy of “\(path)” was replaced while it was downloaded. Nothing was replaced.")
             }
         }
     }
@@ -849,11 +853,21 @@ final class SFTPClient: @unchecked Sendable {
         try? url.setResourceValues(values)
     }
 
+    /// Called with the local temporary path after it has been closed and before it is published
+    /// (tests only: a stand-in for someone who can write the folder and swaps the file for a link).
+    var afterDownloadClose: (@Sendable (String) -> Void)?
+
     /// Download a file with pipelined reads. `progress` receives the bytes written so far.
     /// The data goes to a temporary file next to `localURL` that takes its place only once the
     /// download is complete, so an existing local file survives a failed or cancelled download.
     /// It is then not overwritten either: `trash` moves it to the Trash, where it can be put back
     /// (when that fails, the download fails and the file stays).
+    ///
+    /// The temporary file is created exclusively (`O_EXCL` and `O_NOFOLLOW`) at the remote file's
+    /// mode — 0600 when the server did not report one. That mode is applied before any byte is
+    /// written, so on a normal volume the process umask cannot widen it, and a symlink at the
+    /// name is not followed. The name is checked again before it is published: if it no longer
+    /// refers to that file, the download stops and `localURL` is left as it was.
     @discardableResult
     func download(_ remotePath: String, to localURL: URL,
                   progress: @escaping @Sendable (UInt64) -> Void = { _ in },
@@ -866,25 +880,27 @@ final class SFTPClient: @unchecked Sendable {
         }
 
         let handle = try await openFile(remotePath, flags: .read)
-        let knownSize = (try? expectAttributes(try await request(PacketType.fstat) { $0.bytes(handle) }))?.size
+        let remoteAttributes = try? expectAttributes(try await request(PacketType.fstat) { $0.bytes(handle) })
+        let knownSize = remoteAttributes?.size
+        let localMode = Self.downloadPermissions(of: remoteAttributes)
 
         // Named after the file, unless that would exceed the 255-byte limit on file names.
         let partSuffix = ".\(UUID().uuidString.prefix(8)).part"
         let name = localURL.lastPathComponent
         let partName = name.utf8.count + partSuffix.utf8.count < 255 ? "." + name + partSuffix : partSuffix
         let partURL = localURL.deletingLastPathComponent().appendingPathComponent(partName)
-        let file: FileHandle
+        let opened: ExclusiveDownloadFile
         do {
-            guard fm.createFile(atPath: partURL.path, contents: nil) else {
-                throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: localURL.path])
-            }
-            file = try FileHandle(forWritingTo: partURL)
+            opened = try Self.openExclusiveDownloadFile(at: partURL, permissions: localMode)
         } catch {
-            try? fm.removeItem(at: partURL)
+            // The name was not created by this call (it exists, or it is a symlink). Leave it.
             try? await closeHandle(handle)
             throw error
         }
+        let file = opened.handle
         var received: UInt64 = 0
+        var localClosed = false
+        var remoteClosed = false
 
         do {
             try await withThrowingTaskGroup(of: (offset: UInt64, requested: UInt32, data: Data?).self) { group in
@@ -930,11 +946,22 @@ final class SFTPClient: @unchecked Sendable {
                 }
             }
             try file.close()
+            localClosed = true
             try await closeHandle(handle)
+            remoteClosed = true
+            afterDownloadClose?(partURL.path)
+            // A directory the caller can write lets someone swap the name for a symlink after
+            // the handle is closed. rename would then publish the link. The bytes went to the
+            // inode this fd created; only that inode may take the destination's name.
+            guard Self.localFile(at: partURL, matches: opened.identity) else {
+                throw Failure.downloadFileReplaced(localURL.path)
+            }
         } catch {
-            try? file.close()
-            try? fm.removeItem(at: partURL)
-            try? await closeHandle(handle)
+            if !localClosed { try? file.close() }
+            // unlink does not follow a symlink, and it does not remove a directory that was
+            // put at this name. removeItem would delete whichever of those it found.
+            unlink(partURL.path)
+            if !remoteClosed { try? await closeHandle(handle) }
             throw error
         }
         // Before it gets its name: the file is never there under it without the mark.
@@ -953,7 +980,7 @@ final class SFTPClient: @unchecked Sendable {
             }
             try replaceFile(at: localURL, with: partURL)
         } catch {
-            try? fm.removeItem(at: partURL)
+            unlink(partURL.path)
             throw error
         }
         return received
@@ -1271,6 +1298,82 @@ final class SFTPClient: @unchecked Sendable {
         guard let slash = bytes.lastIndex(of: 0x2F) else { return "." }
         return slash == bytes.startIndex ? "/" : String(Substring(bytes[..<slash]))
     }
+
+    /// Permission bits for a downloaded copy. Setuid, setgid and sticky are dropped: a file
+    /// from a server must not become setuid here. 0600 when the server said nothing — otherwise
+    /// the process umask (usually 0644) would apply to every byte of a private file.
+    static func downloadPermissions(of attributes: Attributes?) -> UInt32 {
+        guard let permissions = attributes?.permissions else { return 0o600 }
+        return permissions & 0o777
+    }
+
+    struct LocalFileIdentity: Equatable, Sendable {
+        var device: UInt64
+        var inode: UInt64
+    }
+
+    struct ExclusiveDownloadFile {
+        var handle: FileHandle
+        var identity: LocalFileIdentity
+    }
+
+    /// A new regular file at `url`, with `permissions` in place before any byte is written.
+    ///
+    /// `open` applies the process umask, so the mode is set again with `fchmod` on this fd
+    /// before the caller writes. `O_EXCL` leaves an existing name untouched. `O_NOFOLLOW` does
+    /// not follow a symlink, and does not create the file through one. A volume that rejects
+    /// `fchmod` (some external disks) keeps the umask mode: the download still proceeds, because
+    /// that volume has no per-account permissions to preserve.
+    static func openExclusiveDownloadFile(at url: URL, permissions: UInt32) throws -> ExclusiveDownloadFile {
+        let mode = mode_t(permissions & 0o777)
+        let fd = openFileDescriptor(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)
+        guard fd >= 0 else {
+            if errno == EEXIST {
+                throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: url.path])
+            }
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
+        }
+        // Best effort. A volume without Unix permissions rejects this; the file stays at the
+        // umask mode, and the download still proceeds. On a normal volume the mode is set
+        // before any byte is written, so umask cannot widen it.
+        _ = fchmod(fd, mode)
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+            closeFileDescriptor(fd)
+            unlink(url.path)
+            throw POSIXError(.EPERM)
+        }
+        let identity = LocalFileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
+        return ExclusiveDownloadFile(
+            handle: FileHandle(fileDescriptor: fd, closeOnDealloc: true),
+            identity: identity
+        )
+    }
+
+    /// True when `url` is still the regular file `identity` names. `lstat` does not follow a
+    /// symlink put at that path.
+    static func localFile(at url: URL, matches identity: LocalFileIdentity) -> Bool {
+        var info = stat()
+        guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return false }
+        return UInt64(info.st_dev) == identity.device && UInt64(info.st_ino) == identity.inode
+    }
+}
+
+/// `open(2)` / `close(2)`. At file scope so they are not confused with anything on `SFTPClient`.
+private func openFileDescriptor(_ path: String, _ flags: Int32, _ mode: mode_t) -> Int32 {
+    #if canImport(Darwin)
+    return Darwin.open(path, flags, mode)
+    #else
+    return Glibc.open(path, flags, mode)
+    #endif
+}
+
+private func closeFileDescriptor(_ fd: Int32) {
+    #if canImport(Darwin)
+    _ = Darwin.close(fd)
+    #else
+    _ = Glibc.close(fd)
+    #endif
 }
 
 /// rename(2): atomically puts `source` in place of `destination`; it fails rather than replace a

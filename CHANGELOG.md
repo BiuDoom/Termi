@@ -109,6 +109,10 @@ The project version is 2.1.0; it has not been released yet.
 
 ### Security
 
+- An SFTP download no longer writes its temporary file world-readable, and it no longer follows a
+  symlink placed at that name. The copy is created at the remote file's mode (0600 when the server
+  does not say) before any byte is written. If that name is replaced before the download is
+  published, the download stops and the existing local file stays.
 - Passwords, passphrases and one-time codes reach `ssh` and `ssh-keygen` through a private helper;
   they are never on a command line or in an environment variable.
 - Nothing of a locked window stays visible or reachable: pages, sheets, alerts and sign-in prompts

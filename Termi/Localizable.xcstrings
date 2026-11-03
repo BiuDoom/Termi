@@ -1088,6 +1088,16 @@
         }
       }
     },
+    "The temporary copy of “%@” was replaced while it was downloaded. Nothing was replaced." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下载期间“%@”的临时副本被替换。未替换任何内容。"
+          }
+        }
+      }
+    },
     "Themes" : {
       "localizations" : {
         "zh-Hans" : {
