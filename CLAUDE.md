@@ -189,6 +189,7 @@ Termi/
 
 | Hash | 信息 | 日期 |
 |------|------|------|
+| `d5db6e7` | fix: don't follow a symlink or publish a world-readable SFTP download | 2026-11-03 |
 | `96a85c8` | fix: keep network rates when one interface counter drops | 2026-11-02 |
 | `dd88a96` | fix: don't SIGKILL a process group after its id can be reused | 2026-11-01 |
 | `3f44d1f` | fix: the twelve findings of the 2026-10-11 review — atomic SFTP replacement, generation-guarded vault writes, and saved passwords bound to the login they were typed for | 2026-10-19 |
