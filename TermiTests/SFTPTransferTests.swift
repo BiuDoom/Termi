@@ -2346,6 +2346,133 @@ private func sftpRequestLines(_ log: URL) -> [String] {
     #expect(untouched == nil)
 }
 
+@Test func sftpDownloadPermissionsKeepTheRemoteModeWithoutSetuid() {
+    let missing = SFTPClient.downloadPermissions(of: nil)
+    #expect(missing == 0o600)
+    let secret = SFTPClient.downloadPermissions(of: SFTPClient.Attributes(permissions: 0o100600))
+    #expect(secret == 0o600)
+    let shared = SFTPClient.downloadPermissions(of: SFTPClient.Attributes(permissions: 0o100644))
+    #expect(shared == 0o644)
+    let executable = SFTPClient.downloadPermissions(of: SFTPClient.Attributes(permissions: 0o100755))
+    #expect(executable == 0o755)
+    // A setuid bit from the server must not be applied to the local copy.
+    let setuid = SFTPClient.downloadPermissions(of: SFTPClient.Attributes(permissions: 0o104755))
+    #expect(setuid == 0o755)
+}
+
+@Test func sftpDownloadFileIsCreatedAtTheAskedModeAndDoesNotFollowALink() throws {
+    let scratch = try sftpScratchFolder()
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    let target = scratch.appendingPathComponent("sentinel")
+    try Data("keep".utf8).write(to: target)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+    let link = scratch.appendingPathComponent("link")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+    let followed = Result { try SFTPClient.openExclusiveDownloadFile(at: link, permissions: 0o600) }
+    if case .success = followed { Issue.record("wrote through a symlink") }
+    let sentinel = try Data(contentsOf: target)
+    #expect(sentinel == Data("keep".utf8))
+    let sentinelMode = try posixMode(of: target)
+    #expect(sentinelMode == 0o600)
+
+    let created = scratch.appendingPathComponent("id_rsa")
+    let opened = try SFTPClient.openExclusiveDownloadFile(at: created, permissions: 0o600)
+    try opened.handle.write(contentsOf: Data("secret".utf8))
+    #expect(SFTPClient.localFile(at: created, matches: opened.identity))
+    try opened.handle.close()
+    let written = try Data(contentsOf: created)
+    #expect(written == Data("secret".utf8))
+    let createdMode = try posixMode(of: created)
+    #expect(createdMode == 0o600)
+
+    // 0666 is what Foundation's create would ask for; umask would turn that into 0644 without fchmod.
+    let wide = scratch.appendingPathComponent("wide")
+    let wideOpened = try SFTPClient.openExclusiveDownloadFile(at: wide, permissions: 0o666)
+    try wideOpened.handle.close()
+    let wideMode = try posixMode(of: wide)
+    #expect(wideMode == 0o666)
+
+    let replaced = Result { try SFTPClient.openExclusiveDownloadFile(at: created, permissions: 0o644) }
+    if case .success = replaced { Issue.record("replaced an existing file") }
+    let kept = try Data(contentsOf: created)
+    #expect(kept == Data("secret".utf8))
+    let keptMode = try posixMode(of: created)
+    #expect(keptMode == 0o600)
+
+    try FileManager.default.moveItem(at: created, to: scratch.appendingPathComponent("id_rsa.moved"))
+    try FileManager.default.createSymbolicLink(at: created, withDestinationURL: target)
+    let moved = scratch.appendingPathComponent("id_rsa.moved")
+    #expect(!SFTPClient.localFile(at: created, matches: opened.identity))
+    #expect(SFTPClient.localFile(at: moved, matches: opened.identity))
+}
+
+@Test func sftpDownloadSwappedForALinkWritesNothingItPointsAt() async throws {
+    let scratch = try sftpScratchFolder()
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    let fm = FileManager.default
+    let source = scratch.appendingPathComponent("id_rsa")
+    let destination = scratch.appendingPathComponent("copy")
+    let sentinel = scratch.appendingPathComponent("sentinel")
+    try Data("secret".utf8).write(to: source)
+    try Data("old".utf8).write(to: destination)
+    try Data("keep".utf8).write(to: sentinel)
+    try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: source.path)
+    try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: destination.path)
+    try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sentinel.path)
+    guard let client = try await sftpLocalClient(startingIn: scratch) else { return }
+    defer { client.close() }
+    let sentinelPath = sentinel.path
+    client.afterDownloadClose = { part in
+        try? FileManager.default.moveItem(atPath: part, toPath: part + ".moved")
+        try? FileManager.default.createSymbolicLink(atPath: part, withDestinationPath: sentinelPath)
+    }
+    let trash = scratch.appendingPathComponent("trash", isDirectory: true)
+    do {
+        _ = try await client.download(source.path, to: destination, trash: scratchTrash(trash))
+        Issue.record("published what took the temporary file's place")
+    } catch let failure as SFTPClient.Failure {
+        #expect(failure == .downloadFileReplaced(destination.path))
+    }
+    let sentinelContent = try Data(contentsOf: sentinel)
+    #expect(sentinelContent == Data("keep".utf8))
+    let sentinelMode = try posixMode(of: sentinel)
+    #expect(sentinelMode == 0o600)
+    let kept = try Data(contentsOf: destination)
+    #expect(kept == Data("old".utf8))
+    let keptMode = try posixMode(of: destination)
+    #expect(keptMode == 0o644)
+    let names = try fm.contentsOfDirectory(atPath: scratch.path)
+    let links = names.filter { $0.hasSuffix(".part") }
+    #expect(links.isEmpty)
+    let moved = try #require(names.first { $0.hasSuffix(".part.moved") })
+    let movedMode = try posixMode(of: scratch.appendingPathComponent(moved))
+    #expect(movedMode == 0o600)
+}
+
+@Test func sftpDownloadKeepsTheRemoteMode() async throws {
+    let scratch = try sftpScratchFolder()
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    let secret = scratch.appendingPathComponent("id_rsa")
+    let script = scratch.appendingPathComponent("backup.sh")
+    try Data("secret".utf8).write(to: secret)
+    try Data("#!/bin/sh\n".utf8).write(to: script)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secret.path)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+    guard let client = try await sftpLocalClient(startingIn: scratch) else { return }
+    defer { client.close() }
+    let secretCopy = scratch.appendingPathComponent("id_rsa.copy")
+    let scriptCopy = scratch.appendingPathComponent("backup.sh.copy")
+    _ = try await client.download(secret.path, to: secretCopy)
+    _ = try await client.download(script.path, to: scriptCopy)
+    let secretMode = try posixMode(of: secretCopy)
+    let scriptMode = try posixMode(of: scriptCopy)
+    #expect(secretMode == 0o600)
+    #expect(scriptMode == 0o755)
+    let secretBytes = try Data(contentsOf: secretCopy)
+    #expect(secretBytes == Data("secret".utf8))
+}
+
 @Test func sftpEditsOfTheSameNameAreToldApartByTheirFolder() {
     let live = RemoteEditItem(remotePath: "/etc/nginx/nginx.conf",
                               localURL: URL(fileURLWithPath: "/tmp/edit-a/nginx.conf"))

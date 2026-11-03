@@ -189,6 +189,7 @@ Termi/
 
 | Hash | 信息 | 日期 |
 |------|------|------|
+| `d5db6e7` | fix: don't follow a symlink or publish a world-readable SFTP download | 2026-11-03 |
 | `96a85c8` | fix: keep network rates when one interface counter drops | 2026-11-02 |
 | `dd88a96` | fix: don't SIGKILL a process group after its id can be reused | 2026-11-01 |
 | `3f44d1f` | fix: the twelve findings of the 2026-10-11 review — atomic SFTP replacement, generation-guarded vault writes, and saved passwords bound to the login they were typed for | 2026-10-19 |
@@ -406,6 +407,9 @@ Termi/
 ---
 
 ## 更新日志
+
+### 2026-11-03
+- **SFTP 下载的临时文件不再先变成别人能读的，也不再顺着同名符号链接写进去**：原来用 `FileManager.createFile` 建 `.part`，权限是进程 umask（通常 0644），而且会跟随符号链接并把内容写进它指向的文件。现在用 `O_EXCL | O_NOFOLLOW` 建文件，在写入任何字节之前 `fchmod` 成远端权限（服务器没给权限就是 0600，去掉 setuid / setgid / sticky）。发布前再 `lstat` 核对还是不是这个 inode；名字被换成链接就不改名，已有的本地文件留在原地。磁盘上的库和保险库格式没有改。
 
 ### 2026-11-02
 - **监控的网络速率不再因为一块网卡消失或计数回绕就变成 0**：接收/发送字节仍是各网卡计数之和，但速率按网卡各自的增量相加。隧道接口关掉、桥接接口带着历史总量出现、或单块网卡的计数往回走时，其余网卡这段时间里的流量还在。磁盘格式没有改。
