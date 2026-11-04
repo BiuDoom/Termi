@@ -109,6 +109,9 @@ The project version is 2.1.0; it has not been released yet.
 
 ### Security
 
+- The directory that holds a connection's private keys, ssh config and askpass socket is created
+  with `mkdir(0700)` and is never a symlink that was followed. A name already inside a directory
+  this call just created is refused. Importing or generating a key uses the same directory.
 - An SFTP download no longer writes its temporary file world-readable, and it no longer follows a
   symlink placed at that name. The copy is created at the remote file's mode (0600 when the server
   does not say) before any byte is written. If that name is replaced before the download is

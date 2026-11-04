@@ -1,10 +1,5 @@
 import Foundation
 import os.log
-#if canImport(Darwin)
-import Darwin
-#elseif canImport(Glibc)
-import Glibc
-#endif
 
 /// SSH Key generation using ssh-keygen
 actor SSHKeyGenerator {
@@ -317,17 +312,12 @@ actor SSHKeyGenerator {
 
     /// A private directory for the key files and the askpass socket, removed by the caller.
     /// The name is short because the path of a Unix socket is limited to about 100 bytes.
-    /// Creating with `withIntermediateDirectories: false` still fails if the name is taken.
-    /// `createDirectory`'s mode is masked by umask; the chmod afterwards is what makes it 0700.
+    /// An existing name is left untouched. The directory is created with `mkdir(0700)`, so the
+    /// process umask can only narrow it, and it is 0700 before a key is written into it.
     private static func makeWorkDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("termi-key-" + UUID().uuidString.prefix(8))
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false,
-                                                attributes: [.posixPermissions: 0o700])
-        guard chmod(url.path, 0o700) == 0 else {
-            try? FileManager.default.removeItem(at: url)
-            throw SSHError.invalidConfiguration("Cannot secure \(url.lastPathComponent)")
-        }
+        try SSHRuntime.makePrivateDirectory(url)
         return url
     }
 
