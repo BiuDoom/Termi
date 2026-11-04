@@ -1171,3 +1171,80 @@ private func recordedProcessIdentifier(_ url: URL) -> Int32? {
     defer { if SSHRuntime.isProcessAlive(pid) { kill(pid, SIGKILL) } }
     #expect(!SSHRuntime.isProcessAlive(pid))
 }
+
+// The runtime directory holds private keys and the askpass socket, in a temporary directory
+// other accounts can list. It has to be 0700 before anything is written, and a symlink at the
+// path must not be chmod'd or written through.
+@Test func privateDirectoryIsOwnerOnlyAndDoesNotFollowASymlink() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-PrivateDir-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let created = folder.appendingPathComponent("created", isDirectory: true)
+    try SSHRuntime.makePrivateDirectory(created)
+    #expect(try directoryMode(created.path) == 0o700)
+    let createdNames = try FileManager.default.contentsOfDirectory(atPath: created.path)
+    #expect(createdNames.isEmpty)
+
+    // A fresh name must not take a directory that is already there, or tighten it.
+    let occupied = folder.appendingPathComponent("occupied", isDirectory: true)
+    try FileManager.default.createDirectory(at: occupied, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: occupied.path)
+    try Data("keep".utf8).write(to: occupied.appendingPathComponent("old-key"))
+    let refused = Result { try SSHRuntime.makePrivateDirectory(occupied) }
+    if case .success = refused {
+        Issue.record("reused a directory a fresh name must not take")
+    }
+    #expect(try directoryMode(occupied.path) == 0o755)
+    #expect(try Data(contentsOf: occupied.appendingPathComponent("old-key")) == Data("keep".utf8))
+
+    // The runtime directory is the exception: a crashed run may have left it. Tighten it,
+    // and leave what is already inside.
+    try SSHRuntime.makePrivateDirectory(occupied, reuseExisting: true)
+    #expect(try directoryMode(occupied.path) == 0o700)
+    #expect(try Data(contentsOf: occupied.appendingPathComponent("old-key")) == Data("keep".utf8))
+
+    let planted = folder.appendingPathComponent("planted", isDirectory: true)
+    try FileManager.default.createDirectory(at: planted, withIntermediateDirectories: true)
+    try Data("x".utf8).write(to: planted.appendingPathComponent("sneak"))
+    let rejected = Result { try SSHRuntime.secureOwnerOnlyDirectory(at: planted, requireEmpty: true) }
+    if case .success = rejected {
+        Issue.record("accepted a directory that already had a name in it")
+    }
+    #expect(FileManager.default.fileExists(atPath: planted.appendingPathComponent("sneak").path))
+
+    let target = folder.appendingPathComponent("target-dir", isDirectory: true)
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+    let link = folder.appendingPathComponent("link-dir")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+    let followed = Result { try SSHRuntime.makePrivateDirectory(link, reuseExisting: true) }
+    if case .success = followed {
+        Issue.record("secured a directory through a symlink")
+    }
+    #expect(try directoryMode(target.path) == 0o755)
+    #expect(isSymbolicLink(link.path))
+
+    let file = folder.appendingPathComponent("not-a-directory")
+    try Data("keep".utf8).write(to: file)
+    let overwritten = Result { try SSHRuntime.makePrivateDirectory(file, reuseExisting: true) }
+    if case .success = overwritten {
+        Issue.record("turned a file into a directory")
+    }
+    #expect(try Data(contentsOf: file) == Data("keep".utf8))
+}
+
+private func directoryMode(_ path: String) throws -> Int {
+    var info = stat()
+    guard lstat(path, &info) == 0 else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    return Int(info.st_mode & 0o777)
+}
+
+private func isSymbolicLink(_ path: String) -> Bool {
+    var info = stat()
+    guard lstat(path, &info) == 0 else { return false }
+    return info.st_mode & S_IFMT == S_IFLNK
+}

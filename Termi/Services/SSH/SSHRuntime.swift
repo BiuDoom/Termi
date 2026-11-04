@@ -48,7 +48,9 @@ final class SSHRuntime: @unchecked Sendable {
     func start() throws {
         try lock.withLock {
             guard !started else { return }
-            try Self.makePrivateDirectory(directory)
+            // A crash can leave this pid's directory behind. Reuse that real directory;
+            // a symlink at the same path is not a directory and must not be followed.
+            try Self.makePrivateDirectory(directory, reuseExisting: true)
             try askpass.start()
             started = true
         }
@@ -279,18 +281,98 @@ final class SSHRuntime: @unchecked Sendable {
 
     // MARK: - File helpers
 
-    static func makePrivateDirectory(_ url: URL) throws {
-        let fm = FileManager.default
-        var isDirectory: ObjCBool = false
-        if fm.fileExists(atPath: url.path, isDirectory: &isDirectory) {
-            guard isDirectory.boolValue else {
-                throw SSHError.invalidConfiguration("\(url.path) is not a directory")
+    /// Create `url` as a directory only this user can list or add to.
+    ///
+    /// `FileManager.createDirectory` asks `mkdir` for 0777 and applies the requested mode
+    /// afterwards, so the directory exists as 0755 (or 0777, when the umask is 0) before
+    /// `chmod`. In a shared temporary directory another account can add a name in that gap —
+    /// a symlink where a private key or the askpass socket is about to be written.
+    /// `mkdir(0700)` is masked by umask and so is never wider than 0700. `fchmod` on the
+    /// directory fd then sets 0700 exactly, in case the mask cleared the execute bit.
+    ///
+    /// `fileExists` and `chmod` follow a symlink. A link planted at `url` used to be treated
+    /// as the directory and its target chmod'd to 0700, after which key files were written
+    /// through the link. `mkdir` fails when the name exists, and the fd is opened with
+    /// `O_NOFOLLOW`, so the target is left untouched.
+    ///
+    /// A directory this call created must still be empty once it is 0700: a name that appeared
+    /// in the gap is refused and the directory is removed. An existing directory is reused
+    /// only when `reuseExisting` is set (the runtime directory, whose name is the pid and which
+    /// a crashed run may have left behind). It still has to be a real directory this user owns.
+    static func makePrivateDirectory(_ url: URL, reuseExisting: Bool = false) throws {
+        if mkdir(url.path, 0o700) == 0 {
+            do {
+                try secureOwnerOnlyDirectory(at: url, requireEmpty: true)
+            } catch {
+                try? FileManager.default.removeItem(at: url)
+                throw error
             }
-        } else {
-            try fm.createDirectory(at: url, withIntermediateDirectories: true)
+            return
         }
-        guard chmod(url.path, 0o700) == 0 else {
-            throw SSHError.invalidConfiguration("Cannot secure \(url.path)")
+        let createError = errno
+        if createError == EEXIST, reuseExisting {
+            try secureOwnerOnlyDirectory(at: url, requireEmpty: false)
+            return
+        }
+        let reason = String(cString: strerror(createError))
+        throw SSHError.invalidConfiguration("Cannot create \(url.lastPathComponent): \(reason)")
+    }
+
+    /// `mode` 0700 on the directory fd, which is the directory itself and not a symlink.
+    /// When `requireEmpty` is set, a name already inside it is an error: the caller has not
+    /// written anything yet, so the name belongs to someone else.
+    static func secureOwnerOnlyDirectory(at url: URL, requireEmpty: Bool) throws {
+        let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw SSHError.invalidConfiguration(
+                "Cannot secure \(url.lastPathComponent): \(String(cString: strerror(errno)))")
+        }
+        defer { close(fd) }
+
+        // Owned by this user before the mode changes. As root, fchmod would succeed on
+        // somebody else's directory; that directory is not this runtime.
+        var info = stat()
+        guard fstat(fd, &info) == 0 else {
+            throw SSHError.invalidConfiguration(
+                "Cannot secure \(url.lastPathComponent): \(String(cString: strerror(errno)))")
+        }
+        guard info.st_mode & S_IFMT == S_IFDIR, info.st_uid == getuid() else {
+            throw SSHError.invalidConfiguration("Cannot secure \(url.lastPathComponent)")
+        }
+        guard fchmod(fd, 0o700) == 0 else {
+            throw SSHError.invalidConfiguration(
+                "Cannot secure \(url.lastPathComponent): \(String(cString: strerror(errno)))")
+        }
+        var secured = stat()
+        guard fstat(fd, &secured) == 0 else {
+            throw SSHError.invalidConfiguration(
+                "Cannot secure \(url.lastPathComponent): \(String(cString: strerror(errno)))")
+        }
+        let mode = UInt32(secured.st_mode) & 0o777
+        guard mode == 0o700 else {
+            throw SSHError.invalidConfiguration("Cannot secure \(url.lastPathComponent)")
+        }
+        // The path still names this directory. A symlink put in its place has a different
+        // identity, and lstat does not follow it into looking like the directory.
+        var linked = stat()
+        guard lstat(url.path, &linked) == 0, linked.st_dev == secured.st_dev, linked.st_ino == secured.st_ino else {
+            throw SSHError.invalidConfiguration("Cannot secure \(url.lastPathComponent)")
+        }
+        if requireEmpty {
+            let names: [String]
+            do {
+                names = try FileManager.default.contentsOfDirectory(atPath: url.path)
+            } catch {
+                throw SSHError.invalidConfiguration("Cannot secure \(url.lastPathComponent)")
+            }
+            guard names.isEmpty else {
+                throw SSHError.invalidConfiguration("Cannot secure \(url.lastPathComponent)")
+            }
+            // Listed the directory this fd holds, not a name put in its place afterwards.
+            var listed = stat()
+            guard lstat(url.path, &listed) == 0, listed.st_dev == secured.st_dev, listed.st_ino == secured.st_ino else {
+                throw SSHError.invalidConfiguration("Cannot secure \(url.lastPathComponent)")
+            }
         }
     }
 

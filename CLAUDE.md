@@ -1,7 +1,7 @@
 # Termi — macOS SSH Client
 
 > 项目知识库，为 Claude Code 和其他 AI Agent 提供上下文。同步至 Obsidian vault。
-> **最后更新**: 2026-11-02
+> **最后更新**: 2026-11-04
 
 ---
 
@@ -189,6 +189,7 @@ Termi/
 
 | Hash | 信息 | 日期 |
 |------|------|------|
+| `ae341f4` | fix: create the SSH runtime directory owner-only, and don't follow a symlink | 2026-11-04 |
 | `d5db6e7` | fix: don't follow a symlink or publish a world-readable SFTP download | 2026-11-03 |
 | `96a85c8` | fix: keep network rates when one interface counter drops | 2026-11-02 |
 | `dd88a96` | fix: don't SIGKILL a process group after its id can be reused | 2026-11-01 |
@@ -407,6 +408,9 @@ Termi/
 ---
 
 ## 更新日志
+
+### 2026-11-04
+- **SSH 运行时目录和密钥临时目录不再先按 umask 建出来，也不再顺着同名符号链接改权限**：`FileManager.createDirectory` 按 0777 建目录，再 `chmod`，而 `chmod` 会跟随符号链接。这个目录里放着私钥、ssh 配置和 askpass socket。现在用 `mkdir(0700)` 创建，用 `O_NOFOLLOW` 打开目录 fd 后 `fchmod` 成 0700；刚创建的目录里如果已经有名字就拒绝并删掉。崩溃后留下的、属于本次进程号的真实目录仍可沿用。磁盘上的库和保险库格式没有改。
 
 ### 2026-11-03
 - **SFTP 下载的临时文件不再先变成别人能读的，也不再顺着同名符号链接写进去**：原来用 `FileManager.createFile` 建 `.part`，权限是进程 umask（通常 0644），而且会跟随符号链接并把内容写进它指向的文件。现在用 `O_EXCL | O_NOFOLLOW` 建文件，在写入任何字节之前 `fchmod` 成远端权限（服务器没给权限就是 0600，去掉 setuid / setgid / sticky）。发布前再 `lstat` 核对还是不是这个 inode；名字被换成链接就不改名，已有的本地文件留在原地。磁盘上的库和保险库格式没有改。
