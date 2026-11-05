@@ -109,6 +109,10 @@ The project version is 2.1.0; it has not been released yet.
 
 ### Security
 
+- A database backup is owner-only from the moment it is visible. The copy is written in a
+  private directory and published with `rename`, so replacing an older world-readable backup
+  does not keep that mode, and a symlink at the destination is not written through. Restoring
+  copies the chosen file the same way and does not follow a symlink used as its write-ahead log.
 - The directory that holds a connection's private keys, ssh config and askpass socket is created
   with `mkdir(0700)` and is never a symlink that was followed. A name already inside a directory
   this call just created is refused. Importing or generating a key uses the same directory.

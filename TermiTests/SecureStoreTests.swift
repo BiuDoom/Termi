@@ -508,7 +508,7 @@ private func insertHost(labelled label: String, into pool: DatabasePool) async t
 }
 
 // VACUUM INTO creates its file 0644 under the usual umask. The staging directory has to be
-// 0700 before that write, or the pages are world-readable until a later chmod.
+// 0700 from the moment it exists, or the pages are world-readable until a later chmod.
 @Test func backupStagingDirectoryIsOwnerOnly() throws {
     let folder = FileManager.default.temporaryDirectory
         .appendingPathComponent("Termi-Tests-\(UUID().uuidString)", isDirectory: true)
@@ -557,6 +557,106 @@ private func insertHost(labelled label: String, into pool: DatabasePool) async t
     #expect(try posixMode(backup.path) == 0o600)
     let leftovers = try FileManager.default.contentsOfDirectory(atPath: scratch.folder.path)
         .filter { $0.hasPrefix(".backup.db") }
+    #expect(leftovers.isEmpty)
+}
+
+// `replaceItemAt` keeps the permissions of the file it replaces, and it follows a symlink.
+// A backup saved over an older world-readable copy, or onto a link, would publish the
+// database (vault included) where other accounts can read it.
+@Test func backupReplacesASymlinkInsteadOfWritingThroughIt() async throws {
+    let scratch = try makeScratchDatabase()
+    defer { discard(scratch) }
+    try await insertHost(labelled: "secret", into: scratch.pool)
+
+    let target = scratch.folder.appendingPathComponent("keep-me")
+    try Data("do not touch".utf8).write(to: target)
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: target.path)
+    let link = scratch.folder.appendingPathComponent("through-link.db")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+    try await DatabaseManager.backup(scratch.pool, to: link)
+    #expect(try Data(contentsOf: target) == Data("do not touch".utf8))
+    #expect(try posixMode(target.path) == 0o644)
+    #expect(try posixMode(link.path) == 0o600)
+    let labels = try hostLabels(inDatabaseAt: link.path)
+    #expect(labels == ["secret"])
+    let isLink = try link.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true
+    #expect(isLink == false)
+
+    // The file just written, made world-readable the way an older backup or a save panel can be.
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: link.path)
+    try await insertHost(labelled: "second", into: scratch.pool)
+    try await DatabaseManager.backup(scratch.pool, to: link)
+    #expect(try posixMode(link.path) == 0o600)
+    let replaced = try hostLabels(inDatabaseAt: link.path)
+    #expect(replaced == ["secret", "second"])
+    #expect(try Data(contentsOf: target) == Data("do not touch".utf8))
+}
+
+@Test func databaseCopyIsOwnerOnlyAndDoesNotFollowASymlink() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-Tests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let source = folder.appendingPathComponent("source")
+    try Data("pages".utf8).write(to: source)
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: source.path)
+    let copied = folder.appendingPathComponent("copied")
+    try DatabaseManager.copyOwnerOnlyRegularFile(from: source, to: copied)
+    #expect(try Data(contentsOf: copied) == Data("pages".utf8))
+    #expect(try posixMode(copied.path) == 0o600)
+
+    let target = folder.appendingPathComponent("keep")
+    try Data("do not touch".utf8).write(to: target)
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: target.path)
+    let link = folder.appendingPathComponent("link")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+    let followed = Result { try DatabaseManager.copyOwnerOnlyRegularFile(from: source, to: link) }
+    if case .success = followed {
+        Issue.record("copied through a symlink")
+    }
+    #expect(try Data(contentsOf: target) == Data("do not touch".utf8))
+    #expect(try posixMode(target.path) == 0o644)
+}
+
+// The copy used to be `copyItem` plus a chmod. A world-readable source stayed world-readable
+// for the whole copy, and a symlink beside it named as its -wal was followed.
+@Test func restoreStageIsOwnerOnlyAndKeepsTheLog() async throws {
+    let scratch = try makeScratchDatabase()
+    defer { discard(scratch) }
+    try await insertHost(labelled: "in-the-log", into: scratch.pool)
+    // Fold the log in first so the copy is not racing a live writer. The source is then
+    // made world-readable, which is how an older backup file is stored.
+    try await scratch.pool.writeWithoutTransaction { db in
+        try db.checkpoint(.truncate)
+    }
+    let live = scratch.folder.appendingPathComponent("scratch.db")
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: live.path)
+
+    let staged = try DatabaseManager.stageBackup(
+        from: live, forDatabaseAt: scratch.folder.appendingPathComponent("other.db").path)
+    #expect(try posixMode(staged.path) == 0o600)
+    let labels = try hostLabels(inDatabaseAt: staged.path)
+    #expect(labels == ["in-the-log"])
+    try FileManager.default.removeItem(at: staged)
+
+    let secret = scratch.folder.appendingPathComponent("secret")
+    try Data("do not touch".utf8).write(to: secret)
+    let backup = scratch.folder.appendingPathComponent("backup.db")
+    try await DatabaseManager.backup(scratch.pool, to: backup)
+    try FileManager.default.createSymbolicLink(
+        at: URL(fileURLWithPath: backup.path + "-wal"), withDestinationURL: secret)
+    let refused = Result {
+        try DatabaseManager.stageBackup(
+            from: backup, forDatabaseAt: scratch.folder.appendingPathComponent("another.db").path)
+    }
+    if case .success = refused {
+        Issue.record("staged a backup whose log is a symlink")
+    }
+    #expect(try Data(contentsOf: secret) == Data("do not touch".utf8))
+    let leftovers = try FileManager.default.contentsOfDirectory(atPath: scratch.folder.path)
+        .filter { $0.contains(".restore-") }
     #expect(leftovers.isEmpty)
 }
 
