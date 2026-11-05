@@ -189,6 +189,7 @@ Termi/
 
 | Hash | 信息 | 日期 |
 |------|------|------|
+| `1b16377` | fix: publish a database backup owner-only, and don't follow a symlink | 2026-11-05 |
 | `ae341f4` | fix: create the SSH runtime directory owner-only, and don't follow a symlink | 2026-11-04 |
 | `d5db6e7` | fix: don't follow a symlink or publish a world-readable SFTP download | 2026-11-03 |
 | `96a85c8` | fix: keep network rates when one interface counter drops | 2026-11-02 |
