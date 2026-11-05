@@ -589,7 +589,8 @@ private func insertHost(labelled label: String, into pool: DatabasePool) async t
     try await DatabaseManager.backup(scratch.pool, to: link)
     #expect(try posixMode(link.path) == 0o600)
     let replaced = try hostLabels(inDatabaseAt: link.path)
-    #expect(replaced == ["secret", "second"])
+    // `hostLabels` orders by label: "second" sorts before "secret".
+    #expect(replaced == ["second", "secret"])
     #expect(try Data(contentsOf: target) == Data("do not touch".utf8))
 }
 
@@ -639,7 +640,10 @@ private func insertHost(labelled label: String, into pool: DatabasePool) async t
     #expect(try posixMode(staged.path) == 0o600)
     let labels = try hostLabels(inDatabaseAt: staged.path)
     #expect(labels == ["in-the-log"])
-    try FileManager.default.removeItem(at: staged)
+    // Opening the copy to read it back creates a wal and shm beside it.
+    for suffix in ["", "-wal", "-shm"] {
+        try? FileManager.default.removeItem(atPath: staged.path + suffix)
+    }
 
     let secret = scratch.folder.appendingPathComponent("secret")
     try Data("do not touch".utf8).write(to: secret)
