@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Where this run keeps its data and its preferences — the one place that decides it.
 ///
@@ -191,12 +196,13 @@ enum AppProfile {
         // The standard profile is created where it always was: by the database on first use.
         guard case .success(let locations) = resolved, locations.kind != .standard else { return resolved }
         do {
-            if locations.kind == .tests, fm.fileExists(atPath: locations.directory.path) {
+            if locations.kind == .tests {
                 // An earlier test process with the same process identifier: start empty.
-                try fm.removeItem(at: locations.directory)
+                // `fileExists` follows a symlink, so a link left at this path would be treated as
+                // the directory. Remove the link itself and leave its target alone.
+                try removeExistingEntry(at: locations.directory)
             }
-            try fm.createDirectory(at: locations.directory, withIntermediateDirectories: true,
-                                   attributes: [.posixPermissions: 0o700])
+            try ensureOwnerOnlyDirectory(at: locations.directory)
             guard fm.isWritableFile(atPath: locations.directory.path) else {
                 return .failure(.unusable(path: locations.directory.path, reason: "the folder is not writable."))
             }
@@ -205,6 +211,180 @@ enum AppProfile {
         }
         return resolved
     }()
+
+    /// Make `url` a real directory this user owns, mode 0700, without following a symlink.
+    ///
+    /// `FileManager.createDirectory` asks `mkdir` for 0777 and applies the requested mode
+    /// afterwards, so the directory exists as 0755 (or 0777, when the umask is 0) before
+    /// `chmod`, and that `chmod` follows a symlink. This folder holds `termi.db`, the vault
+    /// key and session transcripts. `mkdir(0700)` is masked by umask and so is never wider
+    /// than 0700. `fchmod` on the directory fd sets 0700 exactly. `O_NOFOLLOW` refuses a
+    /// symlink at `url`, and a symlink used as a missing parent is refused too, so the
+    /// directory is not created inside whatever that link names.
+    ///
+    /// An existing real directory this user owns is tightened and its contents are kept: the
+    /// standard profile used to be created at the default mode (0755). A directory this call
+    /// has just created must still be empty once it is 0700. A new directory is also refused
+    /// when other accounts can rename it in its parent (the parent is writable by someone
+    /// else and not sticky). An existing directory is still tightened, so a profile that is
+    /// already there keeps opening.
+    static func ensureOwnerOnlyDirectory(at url: URL) throws {
+        let url = url.standardizedFileURL
+        var existing = stat()
+        if lstat(url.path, &existing) == 0 {
+            try secureDirectory(at: url, requireEmpty: false)
+            return
+        }
+        let missing = errno
+        guard missing == ENOENT else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(missing))
+        }
+        try createMissingParents(of: url)
+        try parentKeepsTheChild(url.deletingLastPathComponent())
+        if mkdir(url.path, 0o700) != 0 {
+            let created = errno
+            guard created == EEXIST else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(created))
+            }
+            try secureDirectory(at: url, requireEmpty: false)
+            return
+        }
+        do {
+            try secureDirectory(at: url, requireEmpty: true)
+        } catch {
+            removeDirectoryIfWeCreated(url)
+            throw error
+        }
+    }
+
+    /// `url` is gone. A symlink is unlinked and its target is left in place. A missing path
+    /// is not an error. Used so a test profile can start empty without following a link that
+    /// was planted at its path.
+    private static func removeExistingEntry(at url: URL) throws {
+        var info = stat()
+        if lstat(url.path, &info) != 0 {
+            let error = errno
+            guard error == ENOENT else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(error))
+            }
+            return
+        }
+        if info.st_mode & S_IFMT == S_IFLNK {
+            guard unlink(url.path) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+            return
+        }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    /// Create any missing ancestor of `url` as an empty 0700 directory. An ancestor that
+    /// already exists is left alone, including its mode, unless it is a symlink.
+    private static func createMissingParents(of url: URL) throws {
+        let parent = url.deletingLastPathComponent()
+        if parent.path == "/" || parent.path == url.path { return }
+        var info = stat()
+        if lstat(parent.path, &info) == 0 {
+            guard info.st_mode & S_IFMT == S_IFDIR else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+            }
+            return
+        }
+        let error = errno
+        guard error == ENOENT else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(error))
+        }
+        try createMissingParents(of: parent)
+        try parentKeepsTheChild(parent.deletingLastPathComponent())
+        if mkdir(parent.path, 0o700) != 0 {
+            let created = errno
+            guard created == EEXIST else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(created))
+            }
+            try secureDirectory(at: parent, requireEmpty: false)
+            return
+        }
+        do {
+            try secureDirectory(at: parent, requireEmpty: true)
+        } catch {
+            removeDirectoryIfWeCreated(parent)
+            throw error
+        }
+    }
+
+    /// Other accounts must not be able to rename a directory this call is about to create
+    /// and leave a symlink in its place. Whoever can write a non-sticky directory can rename
+    /// its children. A sticky parent (the usual `/tmp`) lets only the owner of the child do that.
+    private static func parentKeepsTheChild(_ parent: URL) throws {
+        var info = stat()
+        guard lstat(parent.path, &info) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        guard info.st_mode & S_IFMT == S_IFDIR else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+        }
+        let mode = UInt32(info.st_mode)
+        let othersCanWrite = (mode & UInt32(S_IWGRP | S_IWOTH)) != 0
+        let sticky = (mode & UInt32(S_ISVTX)) != 0
+        if othersCanWrite && !sticky {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+        }
+    }
+
+    /// `mode` 0700 on the directory fd, which is the directory itself and not a symlink.
+    /// The directory must be owned by this user before the mode changes. When `requireEmpty`
+    /// is set, a name already inside it is an error.
+    private static func secureDirectory(at url: URL, requireEmpty: Bool) throws {
+        let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { _ = close(fd) }
+
+        var info = stat()
+        guard fstat(fd, &info) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        guard info.st_mode & S_IFMT == S_IFDIR, info.st_uid == getuid() else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+        }
+        guard fchmod(fd, 0o700) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        var secured = stat()
+        guard fstat(fd, &secured) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        let mode = UInt32(secured.st_mode) & 0o777
+        guard secured.st_mode & S_IFMT == S_IFDIR, mode == 0o700 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+        }
+        var linked = stat()
+        guard lstat(url.path, &linked) == 0,
+              linked.st_dev == secured.st_dev, linked.st_ino == secured.st_ino else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+        }
+        guard requireEmpty else { return }
+        let names = try FileManager.default.contentsOfDirectory(atPath: url.path)
+        guard names.isEmpty else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EEXIST))
+        }
+        var listed = stat()
+        guard lstat(url.path, &listed) == 0,
+              listed.st_dev == secured.st_dev, listed.st_ino == secured.st_ino else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+        }
+    }
+
+    /// Remove a directory this call created, after securing it failed. A symlink now standing
+    /// at the path is not a directory and is left alone, and so is a directory owned by
+    /// someone else.
+    private static func removeDirectoryIfWeCreated(_ url: URL) {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return }
+        guard info.st_mode & S_IFMT == S_IFDIR, info.st_uid == getuid() else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
 
     /// The locations of this run. `main.swift` has already left if the profile was refused.
     static let current: Locations = {

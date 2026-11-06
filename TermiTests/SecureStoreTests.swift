@@ -1001,6 +1001,29 @@ private func isVaultKeyCorrupted(_ error: any Error) -> Bool {
     }
 }
 
+@Test func vaultKeyDirectorySymlinkIsNotFollowed() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-Tests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let target = folder.appendingPathComponent("target", isDirectory: true)
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+    let link = folder.appendingPathComponent("link-dir")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+    let saved = Result {
+        try SecureStoreService.persistNewVaultKey(Data(repeating: 0xAB, count: 32),
+                                                   to: link.appendingPathComponent(".vault-key"))
+    }
+    if case .success = saved {
+        Issue.record("wrote a vault key through a directory symlink")
+    }
+    #expect(try posixMode(target.path) == 0o755)
+    #expect(!FileManager.default.fileExists(atPath: target.appendingPathComponent(".vault-key").path))
+}
+
 @Test func databaseFilesAreRestrictedToTheOwner() throws {
     let folder = FileManager.default.temporaryDirectory
         .appendingPathComponent("Termi-Tests-\(UUID().uuidString)", isDirectory: true)

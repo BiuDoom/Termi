@@ -16,11 +16,10 @@ actor DatabaseManager {
     private var databasePath: String {
         get throws {
             let profile = AppProfile.current
-            try FileManager.default.createDirectory(at: profile.directory, withIntermediateDirectories: true,
-                                                    attributes: [.posixPermissions: 0o700])
-            // Attributes are ignored when the folder already exists. The standard profile used to
-            // be created with the default mode (0755), which lets every account on this Mac list it.
-            _ = chmod(profile.directory.path, 0o700)
+            // The folder holds the database, the vault key and session transcripts. Attributes on
+            // `createDirectory` are ignored once the folder exists, and the old `chmod` follows a
+            // symlink. An existing folder this user owns is tightened in place.
+            try AppProfile.ensureOwnerOnlyDirectory(at: profile.directory)
             return profile.databaseURL.path
         }
     }

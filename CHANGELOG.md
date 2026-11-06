@@ -109,6 +109,10 @@ The project version is 2.1.0; it has not been released yet.
 
 ### Security
 
+- The profile folder (the database, the vault key and session transcripts) is owner-only from
+  the moment it exists. It is created with `mkdir(0700)` and a symlink at that path is not
+  followed. An existing folder is tightened in place and its files are kept. A new folder is
+  refused when its parent is a symlink, or when other accounts could rename the new folder.
 - A database backup is owner-only from the moment it is visible. The copy is written in a
   private directory and published with `rename`, so replacing an older world-readable backup
   does not keep that mode, and a symlink at the destination is not written through. Restoring
