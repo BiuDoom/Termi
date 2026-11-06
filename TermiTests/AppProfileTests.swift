@@ -1,6 +1,11 @@
 import AppKit
 import Foundation
 import Testing
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 @testable import Termi
 
 // Where a run keeps its data and its preferences: the pure resolver for the three kinds of
@@ -151,6 +156,119 @@ func appProfileOverrideReachingTheStandardFolderByCaseOrFromInsideIsRefused(valu
     #expect(!parent)
     #expect(!notYetThere)
     #expect(!noStandard)
+}
+
+// The profile folder holds the database, the vault key and session transcripts. It has to be
+// 0700 before any of those are written, and a symlink at the path — or as a parent that does
+// not exist yet — must not be chmod'd or written through. A parent other accounts can rename
+// a new child in is refused; one that is already there is tightened and kept.
+@Test func profileDirectoryIsOwnerOnlyAndDoesNotFollowASymlink() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Termi-ProfileDir-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let created = root.appendingPathComponent("created", isDirectory: true)
+    try AppProfile.ensureOwnerOnlyDirectory(at: created)
+    #expect(try profileDirectoryMode(created.path) == 0o700)
+    let createdNames = try FileManager.default.contentsOfDirectory(atPath: created.path)
+    #expect(createdNames.isEmpty)
+
+    let nested = root.appendingPathComponent("missing/nested/profile", isDirectory: true)
+    try AppProfile.ensureOwnerOnlyDirectory(at: nested)
+    let missingMode = try profileDirectoryMode(root.appendingPathComponent("missing").path)
+    let nestedParentMode = try profileDirectoryMode(root.appendingPathComponent("missing/nested").path)
+    let nestedMode = try profileDirectoryMode(nested.path)
+    #expect(missingMode == 0o700)
+    #expect(nestedParentMode == 0o700)
+    #expect(nestedMode == 0o700)
+
+    let existing = root.appendingPathComponent("existing", isDirectory: true)
+    try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: existing.path)
+    try Data("db".utf8).write(to: existing.appendingPathComponent("termi.db"))
+    try AppProfile.ensureOwnerOnlyDirectory(at: existing)
+    #expect(try profileDirectoryMode(existing.path) == 0o700)
+    #expect(try Data(contentsOf: existing.appendingPathComponent("termi.db")) == Data("db".utf8))
+
+    let target = root.appendingPathComponent("target-dir", isDirectory: true)
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+    let link = root.appendingPathComponent("link-dir")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+    let followed = Result { try AppProfile.ensureOwnerOnlyDirectory(at: link) }
+    if case .success = followed {
+        Issue.record("secured a profile through a symlink")
+    }
+    #expect(try profileDirectoryMode(target.path) == 0o755)
+    #expect(profilePathIsSymbolicLink(link.path))
+
+    let parentLink = root.appendingPathComponent("parent-link")
+    try FileManager.default.createSymbolicLink(at: parentLink, withDestinationURL: target)
+    let throughParent = Result {
+        try AppProfile.ensureOwnerOnlyDirectory(at: parentLink.appendingPathComponent("profile"))
+    }
+    if case .success = throughParent {
+        Issue.record("created a profile through a symlink")
+    }
+    let targetNames = try FileManager.default.contentsOfDirectory(atPath: target.path)
+    #expect(!targetNames.contains("profile"))
+    #expect(try profileDirectoryMode(target.path) == 0o755)
+
+    let file = root.appendingPathComponent("not-a-directory")
+    try Data("keep".utf8).write(to: file)
+    let overwritten = Result { try AppProfile.ensureOwnerOnlyDirectory(at: file) }
+    if case .success = overwritten {
+        Issue.record("turned a file into a directory")
+    }
+    #expect(try Data(contentsOf: file) == Data("keep".utf8))
+
+    let loose = root.appendingPathComponent("loose", isDirectory: true)
+    try FileManager.default.createDirectory(at: loose, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: loose.path)
+    let looseChild = loose.appendingPathComponent("profile", isDirectory: true)
+    let inLooseParent = Result { try AppProfile.ensureOwnerOnlyDirectory(at: looseChild) }
+    if case .success = inLooseParent {
+        Issue.record("created a profile in a directory other accounts can rename")
+    }
+    #expect(!FileManager.default.fileExists(atPath: looseChild.path))
+    // A folder that is already there still has to open: tighten it, keep what it holds.
+    let already = loose.appendingPathComponent("already", isDirectory: true)
+    try FileManager.default.createDirectory(at: already, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: already.path)
+    try Data("stay".utf8).write(to: already.appendingPathComponent("note"))
+    try AppProfile.ensureOwnerOnlyDirectory(at: already)
+    let alreadyMode = try profileDirectoryMode(already.path)
+    let alreadyPermissions: Int = alreadyMode & 0o777
+    #expect(alreadyPermissions == 0o700)
+    #expect(try Data(contentsOf: already.appendingPathComponent("note")) == Data("stay".utf8))
+
+    let sticky = root.appendingPathComponent("sticky", isDirectory: true)
+    try FileManager.default.createDirectory(at: sticky, withIntermediateDirectories: true)
+    // `setAttributes` is not a reliable way to set the sticky bit. `chmod` does not follow this
+    // path: it is a real directory we just created.
+    #expect(chmod(sticky.path, 0o1777) == 0)
+    let stickyParent = try profileDirectoryMode(sticky.path)
+    let stickyBit: Int = stickyParent & 0o1000
+    #expect(stickyBit == 0o1000)
+    let stickyChild = sticky.appendingPathComponent("profile", isDirectory: true)
+    try AppProfile.ensureOwnerOnlyDirectory(at: stickyChild)
+    #expect(try profileDirectoryMode(stickyChild.path) == 0o700)
+}
+
+private func profileDirectoryMode(_ path: String) throws -> Int {
+    var info = stat()
+    guard lstat(path, &info) == 0 else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    // Keeps the sticky bit (0o1000) so a parent can be checked for it. The file type lives above these bits.
+    return Int(info.st_mode) & 0o7777
+}
+
+private func profilePathIsSymbolicLink(_ path: String) -> Bool {
+    var info = stat()
+    guard lstat(path, &info) == 0 else { return false }
+    return info.st_mode & S_IFMT == S_IFLNK
 }
 
 @Test func appProfileThisProcessResolvesTheWayItRuns() {

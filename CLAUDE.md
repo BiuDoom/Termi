@@ -1,7 +1,7 @@
 # Termi — macOS SSH Client
 
 > 项目知识库，为 Claude Code 和其他 AI Agent 提供上下文。同步至 Obsidian vault。
-> **最后更新**: 2026-11-04
+> **最后更新**: 2026-11-06
 
 ---
 
@@ -189,6 +189,7 @@ Termi/
 
 | Hash | 信息 | 日期 |
 |------|------|------|
+| `1ef3975` | fix: make the profile directory owner-only, and don't follow a symlink | 2026-11-06 |
 | `1b16377` | fix: publish a database backup owner-only, and don't follow a symlink | 2026-11-05 |
 | `ae341f4` | fix: create the SSH runtime directory owner-only, and don't follow a symlink | 2026-11-04 |
 | `d5db6e7` | fix: don't follow a symlink or publish a world-readable SFTP download | 2026-11-03 |
@@ -409,6 +410,9 @@ Termi/
 ---
 
 ## 更新日志
+
+### 2026-11-06
+- **配置目录在别人能列出之前就是仅所有者可进入的，也不再顺着符号链接建**：标准配置、隔离配置和测试配置都放着 `termi.db`、保险库密钥和会话转录。原来用 `FileManager.createDirectory` 再 `chmod`，目录会先按 umask 变成 0755（umask 为 0 时是 0777），而 `chmod` 会跟随符号链接。现在用 `mkdir(0700)` 创建，用 `O_NOFOLLOW` 打开目录 fd 后 `fchmod` 成 0700。已有的、属于当前用户的真实目录会就地收紧，里面的文件保留。新建时如果父目录是符号链接，或者别人能在父目录里改名，就拒绝。磁盘上的库和保险库格式没有改。
 
 ### 2026-11-05
 - **数据库备份和恢复副本在别人能打开之前就是仅所有者可读的，也不再顺着符号链接写**：`VACUUM INTO` 按 umask 建出 0644 的文件。覆盖已有备份时 `replaceItemAt` 默认留下原文件的权限，之后的 `chmod` 才收成 0600，而且 `chmod` 会跟随符号链接。现在备份写在 `mkdir(0700)` 的目录里，0600 之后用 `renameat` 换成目标名字（符号链接被换掉，不写进它指向的文件）。恢复时的副本同样在写入任何字节之前 `fchmod` 成 0600，`-wal` 若是符号链接就拒绝。磁盘上的库和保险库格式没有改。

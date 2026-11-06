@@ -500,13 +500,10 @@ actor SecureStoreService {
             throw SecureStoreError.vaultKeyCorrupted(path: url.path)
         }
         let directory = url.deletingLastPathComponent()
-        // 0700 even when the folder already exists: createDirectory's attributes do not apply then.
-        // The standard profile is created by the database without a mode; isolated profiles already
-        // use 0700. chmod is best-effort so a filesystem that rejects it still gets a 0600 key file.
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [
-            .posixPermissions: 0o700
-        ])
-        _ = chmod(directory.path, 0o700)
+        // 0700 before the key file is created, including when the folder already exists.
+        // `createDirectory`'s attributes do not apply then, and `chmod` follows a symlink into
+        // whatever directory the link names. A symlink is refused; the 32 bytes on disk are unchanged.
+        try AppProfile.ensureOwnerOnlyDirectory(at: directory)
         // `open(O_EXCL)` publishes the name before the bytes are written. Link the finished
         // file into place instead, so a second launch never reads a half-written key and then
         // treats it as corruption (which would refuse to start).
